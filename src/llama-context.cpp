@@ -1,10 +1,6 @@
 #include "llama-context.h"
 
 #include "ggml.h"
-#include "../ggml/include/ggml-backend.h"
-#if defined(GGML_USE_CUDA) || defined(GGML_USE_HIP) || defined(GGML_USE_MUSA)
-#include "../ggml/include/ggml-cuda.h"
-#endif
 #include "llama-arch.h"
 #include "llama-graph.h"
 #include "llama-impl.h"
@@ -21,7 +17,6 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
-#include <string>
 
 //
 // llama_context
@@ -34,54 +29,6 @@ static llm_graph_type ctx_type_to_graph_type(llama_context_type ctx_type) {
     }
     throw std::runtime_error("Unsupported ctx type");
 }
-
-struct llm_fused_op_probe {
-    llm_fused_op op;
-    const char * name;
-    uint32_t n_tokens_per_seq;
-};
-
-static const llm_fused_op_probe llm_fused_op_flash_attn_probe = {
-    /*.op               =*/ LLM_FUSED_OP_FLASH_ATTN,
-    /*.name             =*/ "Flash Attention",
-    /*.n_tokens_per_seq =*/ 1,
-};
-
-static const llm_fused_op_probe llm_fused_op_gdn_ar_probe = {
-    /*.op               =*/ LLM_FUSED_OP_GDN_AR,
-    /*.name             =*/ "fused Gated Delta Net (autoregressive)",
-    /*.n_tokens_per_seq =*/ 1,
-};
-
-static const llm_fused_op_probe llm_fused_op_gdn_ch_probe = {
-    /*.op               =*/ LLM_FUSED_OP_GDN_CH,
-    /*.name             =*/ "fused Gated Delta Net (chunked)",
-    /*.n_tokens_per_seq =*/ 16,
-};
-
-static const llm_fused_op_probe llm_fused_op_lid_probe = {
-    /*.op               =*/ LLM_FUSED_OP_LIGHTNING_INDEXER,
-    /*.name             =*/ "Lightning Indexer",
-    /*.n_tokens_per_seq =*/ 1,
-};
-
-static const llm_fused_op_probe llm_fused_op_dsv4_hc_pre_probe = {
-    /*.op               =*/ LLM_FUSED_OP_DSV4_HC_PRE,
-    /*.name             =*/ "fused DeepSeek V4 HC pre",
-    /*.n_tokens_per_seq =*/ 1,
-};
-
-static const llm_fused_op_probe llm_fused_op_dsv4_hc_comb_probe = {
-    /*.op               =*/ LLM_FUSED_OP_DSV4_HC_COMB,
-    /*.name             =*/ "fused DeepSeek V4 HC comb",
-    /*.n_tokens_per_seq =*/ 1,
-};
-
-static const llm_fused_op_probe llm_fused_op_dsv4_hc_post_probe = {
-    /*.op               =*/ LLM_FUSED_OP_DSV4_HC_POST,
-    /*.name             =*/ "fused DeepSeek V4 HC post",
-    /*.n_tokens_per_seq =*/ 1,
-};
 
 llama_context::llama_context(
         const llama_model & model,
@@ -153,10 +100,10 @@ llama_context::llama_context(
         cparams.ctx_other = params.ctx_other;
     }
 
-    if (model.arch == LLM_ARCH_EAGLE3 || model.arch == LLM_ARCH_DFLASH) {
+    if (model.arch == LLM_ARCH_EAGLE3) {
         if (model.tok_embd == nullptr || model.output == nullptr) {
             if (params.ctx_other == nullptr) {
-                throw std::runtime_error(model.arch_name() + " requires ctx_other to be set (this warning is normal during memory fitting)");
+                throw std::runtime_error("EAGLE3 requires ctx_other to be set (this warning is normal during memory fitting)");
             }
             cparams.ctx_other = params.ctx_other;
         }
@@ -254,14 +201,6 @@ llama_context::llama_context(
     cparams.fused_gdn_ch = true;
     cparams.auto_fgdn    = true;
 
-    cparams.fused_lid    = true;
-    cparams.auto_flid    = true;
-
-    cparams.fused_dsv4_hc_pre  = true;
-    cparams.fused_dsv4_hc_comb = true;
-    cparams.fused_dsv4_hc_post = true;
-    cparams.auto_fhc           = true;
-
     // with causal attention, the batch size is limited by the context size
     cparams.n_batch = cparams.causal_attn ? std::min(cparams.n_ctx, params.n_batch) : params.n_batch;
 
@@ -317,7 +256,7 @@ llama_context::llama_context(
     LLAMA_LOG_INFO("%s: n_outputs_max = %u\n",   __func__, cparams.n_outputs_max);
 
     if (cparams.n_ctx_seq < hparams.n_ctx_train) {
-        LLAMA_LOG_INFO("%s: n_ctx_seq (%u) < n_ctx_train (%u) -- the full capacity of the model will not be utilized\n",
+        LLAMA_LOG_WARN("%s: n_ctx_seq (%u) < n_ctx_train (%u) -- the full capacity of the model will not be utilized\n",
                 __func__, cparams.n_ctx_seq, hparams.n_ctx_train);
     }
 
@@ -478,9 +417,6 @@ llama_context::llama_context(
 }
 
 llama_context::~llama_context() {
-    // wait for any pending asynchronous copies into the output buffers before they are freed
-    synchronize();
-
     if (!model.hparams.no_alloc) {
         for (size_t i = 0; i < backend_ptrs.size(); ++i) {
             ggml_backend_t             backend = backend_ptrs[i];
@@ -498,83 +434,6 @@ llama_context::~llama_context() {
         }
     }
     ggml_opt_free(opt_ctx);
-}
-
-void llama_context::resolve_fused_ops(const llama_memory_context_i * mctx, uint32_t n_seqs) {
-    const char * func = __func__;
-    auto resolve = [&](const llm_fused_op_probe & probe, bool & enabled) {
-        if (!enabled) {
-            return;
-        }
-
-        const uint32_t n_tokens_probe = probe.n_tokens_per_seq*n_seqs;
-
-        auto * gf = graph_reserve(n_tokens_probe, n_seqs, n_tokens_probe, mctx, true);
-        if (!gf) {
-            throw std::runtime_error(std::string("failed to reserve graph for ") + probe.name + " check");
-        }
-
-        bool device_mismatch = false;
-        for (const auto & node : get_gf_res_reserve()->get_fused_nodes()) {
-            if (node.op != probe.op) {
-                continue;
-            }
-
-            GGML_ASSERT(node.il >= 0);
-
-            ggml_backend_t backend_fused = ggml_backend_sched_get_tensor_backend(sched.get(), node.tensor);
-            ggml_backend_dev_t device_fused = backend_fused ? ggml_backend_get_device(backend_fused) : nullptr;
-
-            // TODO: make this descriptor-specific; model.dev_layer() preserves the current behavior,
-            // but is still wrong for cases like --no-kv-offload.
-            ggml_backend_dev_t device_layer = model.dev_layer(node.il);
-
-            if (device_fused != device_layer) {
-                LLAMA_LOG_WARN("%s: layer %d is assigned to device %s but %s "
-                        "is assigned to device %s (usually due to missing support)\n",
-                        func, node.il,
-                        device_layer ? ggml_backend_dev_name(device_layer) : "none",
-                        probe.name,
-                        device_fused ? ggml_backend_dev_name(device_fused) : "none");
-                device_mismatch = true;
-                break;
-            }
-        }
-
-        if (device_mismatch) {
-            enabled = false;
-            LLAMA_LOG_WARN("%s: %s not supported, set to disabled\n", func, probe.name);
-        } else {
-            enabled = true;
-            LLAMA_LOG_INFO("%s: %s enabled\n", func, probe.name);
-        }
-    };
-
-    if (cparams.auto_fa) {
-        resolve(llm_fused_op_flash_attn_probe, cparams.flash_attn);
-        cparams.auto_fa = false;
-    }
-
-    if (cparams.auto_fgdn) {
-        LLAMA_LOG_INFO("%s: resolving fused Gated Delta Net support:\n", func);
-        resolve(llm_fused_op_gdn_ar_probe, cparams.fused_gdn_ar);
-        resolve(llm_fused_op_gdn_ch_probe, cparams.fused_gdn_ch);
-        cparams.auto_fgdn = false;
-    }
-
-    if (cparams.auto_flid) {
-        LLAMA_LOG_INFO("%s: resolving fused Lightning Indexer support:\n", func);
-        resolve(llm_fused_op_lid_probe, cparams.fused_lid);
-        cparams.auto_flid = false;
-    }
-
-    if (cparams.auto_fhc) {
-        LLAMA_LOG_INFO("%s: resolving fused DeepSeek V4 HC support:\n", func);
-        resolve(llm_fused_op_dsv4_hc_pre_probe,  cparams.fused_dsv4_hc_pre);
-        resolve(llm_fused_op_dsv4_hc_comb_probe, cparams.fused_dsv4_hc_comb);
-        resolve(llm_fused_op_dsv4_hc_post_probe, cparams.fused_dsv4_hc_post);
-        cparams.auto_fhc = false;
-    }
 }
 
 void llama_context::sched_reserve() {
@@ -616,7 +475,128 @@ void llama_context::sched_reserve() {
 
     LLAMA_LOG_DEBUG("%s: worst-case: n_tokens = %d, n_seqs = %d, n_outputs = %d\n", __func__, n_tokens, n_seqs, n_outputs);
 
-    resolve_fused_ops(mctx.get(), n_seqs);
+    // resolve automatic Flash Attention use
+    if (cparams.auto_fa) {
+        auto * gf = graph_reserve(1, n_seqs, n_outputs, mctx.get(), true);
+        if (!gf) {
+            throw std::runtime_error("failed to reserve graph for Flash Attention check");
+        }
+
+        const size_t prefix_len = strlen(LLAMA_TENSOR_NAME_FATTN) + 1;
+        bool fa_device_mismatch = false;
+        for (int i = 0; i < ggml_graph_n_nodes(gf); i++) {
+            ggml_tensor * n = ggml_graph_node(gf, i);
+            if (n->op != GGML_OP_FLASH_ATTN_EXT) {
+                continue;
+            }
+            ggml_backend_dev_t device_fa = ggml_backend_get_device(ggml_backend_sched_get_tensor_backend(sched.get(), n));
+
+            // TODO: instead of the tensor names, use a map to keep track of which (FA) tensors belong to which layer
+            GGML_ASSERT(strncmp(n->name, LLAMA_TENSOR_NAME_FATTN "-", prefix_len) == 0);
+            const int il = std::stoi(n->name + prefix_len);
+            ggml_backend_dev_t device_kv = model.dev_layer(il);
+            if (device_fa != device_kv) {
+                LLAMA_LOG_WARN("%s: layer %d is assigned to device %s but the Flash Attention tensor "
+                        "is assigned to device %s (usually due to missing support)\n",
+                        __func__, il, ggml_backend_dev_name(device_kv), ggml_backend_dev_name(device_fa));
+                // FIXME: fa_device_mismatch logic is wrong for --no-kv-offload, but this is broken anyways
+                fa_device_mismatch = true;
+                break;
+            }
+        }
+
+        if (fa_device_mismatch) {
+            cparams.flash_attn = false;
+            LLAMA_LOG_WARN("%s: Flash Attention was auto, set to disabled\n", __func__);
+        } else {
+            cparams.flash_attn = true;
+            LLAMA_LOG_INFO("%s: Flash Attention was auto, set to enabled\n", __func__);
+        }
+
+        cparams.auto_fa = false;
+    }
+
+    if (cparams.auto_fgdn) {
+        LLAMA_LOG_INFO("%s: resolving fused Gated Delta Net support:\n", __func__);
+
+        if (cparams.fused_gdn_ar) {
+            auto * gf = graph_reserve(1, n_seqs, n_outputs, mctx.get(), true);
+            if (!gf) {
+                throw std::runtime_error("failed to reserve graph for fused Gated Delta Net check (autoregressive)");
+            }
+
+            const size_t prefix_len = strlen(LLAMA_TENSOR_NAME_FGDN_AR) + 1;
+            bool gdn_device_mismatch = false;
+            for (int i = 0; i < ggml_graph_n_nodes(gf); i++) {
+                ggml_tensor * n = ggml_graph_node(gf, i);
+                if (n->op != GGML_OP_GATED_DELTA_NET) {
+                    continue;
+                }
+                ggml_backend_dev_t device_gdn = ggml_backend_get_device(ggml_backend_sched_get_tensor_backend(sched.get(), n));
+
+                GGML_ASSERT(strncmp(n->name, LLAMA_TENSOR_NAME_FGDN_AR "-", prefix_len) == 0);
+                const int il = std::stoi(n->name + prefix_len);
+                ggml_backend_dev_t device_kv = model.dev_layer(il);
+                if (device_gdn != device_kv) {
+                    LLAMA_LOG_WARN("%s: layer %d is assigned to device %s but the fused Gated Delta Net tensor "
+                            "is assigned to device %s (usually due to missing support)\n",
+                            __func__, il, ggml_backend_dev_name(device_kv), ggml_backend_dev_name(device_gdn));
+                    gdn_device_mismatch = true;
+                    break;
+                }
+            }
+
+            if (gdn_device_mismatch) {
+                cparams.fused_gdn_ar = false;
+                LLAMA_LOG_WARN("%s: fused Gated Delta Net (autoregressive) not supported, set to disabled\n", __func__);
+            } else {
+                LLAMA_LOG_INFO("%s: fused Gated Delta Net (autoregressive) enabled\n", __func__);
+            }
+        }
+
+        if (cparams.fused_gdn_ch) {
+            // more than one token in the batch per sequence in order to take the chunked path
+            // note: n_outputs must match n_tokens for embedding models with mean/rank pooling,
+            // because build_pooling creates inp_mean with shape [n_tokens, n_seqs] and multiplies
+            // it with t_embd which is reduced to [n_outputs, ...] via out_ids. if n_outputs != n_tokens,
+            // the ggml_mul_mat assertion fails.
+            const uint32_t n_tokens_ch = 16*n_seqs;
+            auto * gf = graph_reserve(n_tokens_ch, n_seqs, n_tokens_ch, mctx.get(), true);
+            if (!gf) {
+                throw std::runtime_error("failed to reserve graph for fused Gated Delta Net check (chunked)");
+            }
+
+            const size_t prefix_len = strlen(LLAMA_TENSOR_NAME_FGDN_CH) + 1;
+            bool gdn_device_mismatch = false;
+            for (int i = 0; i < ggml_graph_n_nodes(gf); i++) {
+                ggml_tensor * n = ggml_graph_node(gf, i);
+                if (n->op != GGML_OP_GATED_DELTA_NET) {
+                    continue;
+                }
+                ggml_backend_dev_t device_gdn = ggml_backend_get_device(ggml_backend_sched_get_tensor_backend(sched.get(), n));
+
+                GGML_ASSERT(strncmp(n->name, LLAMA_TENSOR_NAME_FGDN_CH "-", prefix_len) == 0);
+                const int il = std::stoi(n->name + prefix_len);
+                ggml_backend_dev_t device_kv = model.dev_layer(il);
+                if (device_gdn != device_kv) {
+                    LLAMA_LOG_WARN("%s: layer %d is assigned to device %s but the fused Gated Delta Net tensor "
+                            "is assigned to device %s (usually due to missing support)\n",
+                            __func__, il, ggml_backend_dev_name(device_kv), ggml_backend_dev_name(device_gdn));
+                    gdn_device_mismatch = true;
+                    break;
+                }
+            }
+
+            if (gdn_device_mismatch) {
+                cparams.fused_gdn_ch = false;
+                LLAMA_LOG_WARN("%s: fused Gated Delta Net (chunked) not supported, set to disabled\n", __func__);
+            } else {
+                LLAMA_LOG_INFO("%s: fused Gated Delta Net (chunked) enabled\n", __func__);
+            }
+        }
+
+        cparams.auto_fgdn = false;
+    }
 
     // reserve worst-case graph
     int n_splits_pp = -1;
@@ -970,14 +950,6 @@ float * llama_context::get_embeddings_nextn_ith(int32_t i) {
     }
 }
 
-ggml_tensor * llama_context::get_t_h_pre_norm() const {
-    return gf_res_prev ? gf_res_prev->t_h_pre_norm : nullptr;
-}
-
-ggml_tensor * llama_context::get_t_mtp_out() const {
-    return gf_res_prev ? gf_res_prev->t_mtp_out : nullptr;
-}
-
 float * llama_context::get_embeddings_layer_inp(uint32_t lid) {
     output_reorder();
 
@@ -989,21 +961,6 @@ float * llama_context::get_embeddings_layer_inp(uint32_t lid) {
 llama_token llama_context::get_sampled_token_ith(int32_t idx) {
     output_reorder();
 
-    if (!sampling.sampled.has_data()) {
-        return LLAMA_TOKEN_NULL;
-    }
-
-    try {
-        const int64_t row = output_resolve_row(idx);
-        GGML_ASSERT(row < (int64_t) sampling.sampled.size);
-        return sampling.sampled.data[row];
-    } catch (const std::exception & err) {
-        LLAMA_LOG_ERROR("%s: invalid backend sampled token id %d, reason: %s\n", __func__, idx, err.what());
-        return LLAMA_TOKEN_NULL;
-    }
-}
-
-llama_token llama_context::get_sampled_token_ith_no_sync(int32_t idx) {
     if (!sampling.sampled.has_data()) {
         return LLAMA_TOKEN_NULL;
     }
@@ -1037,40 +994,6 @@ float * llama_context::get_sampled_probs_ith(int32_t idx) {
     }
 }
 
-float * llama_context::get_sampled_probs_ith_no_sync(int32_t idx) {
-    if (!sampling.probs.has_data()) {
-        return nullptr;
-    }
-
-    try {
-        const int64_t row = output_resolve_row(idx);
-        if ((size_t) row >= sampling.probs_count.size() || sampling.probs_count[row] == 0) {
-            return nullptr;
-        }
-        return sampling.probs.data + row*model.vocab.n_tokens();
-    } catch (const std::exception & err) {
-        LLAMA_LOG_ERROR("%s: invalid backend sampled probs id %d, reason: %s\n", __func__, idx, err.what());
-        return nullptr;
-    }
-}
-
-size_t llama_context::get_sampled_probs_count_no_sync(int32_t idx) {
-    if (!sampling.probs.has_data()) {
-        return 0;
-    }
-
-    try {
-        const int64_t row = output_resolve_row(idx);
-        if ((size_t) row >= sampling.probs_count.size()) {
-            return 0;
-        }
-        return sampling.probs_count[row];
-    } catch (const std::exception & err) {
-        LLAMA_LOG_ERROR("%s: invalid backend sampled probs count id %d, reason: %s\n", __func__, idx, err.what());
-        return 0;
-    }
-}
-
 float * llama_context::get_sampled_logits_ith(int32_t idx) {
     output_reorder();
 
@@ -1090,40 +1013,6 @@ float * llama_context::get_sampled_logits_ith(int32_t idx) {
     }
 }
 
-float * llama_context::get_sampled_logits_ith_no_sync(int32_t idx) {
-    if (!sampling.logits.has_data()) {
-        return nullptr;
-    }
-
-    try {
-        const int64_t row = output_resolve_row(idx);
-        if ((size_t) row >= sampling.logits_count.size() || sampling.logits_count[row] == 0) {
-            return nullptr;
-        }
-        return sampling.logits.data + row*model.vocab.n_tokens();
-    } catch (const std::exception & err) {
-        LLAMA_LOG_ERROR("%s: invalid backend sampled logits id %d, reason: %s\n", __func__, idx, err.what());
-        return nullptr;
-    }
-}
-
-size_t llama_context::get_sampled_logits_count_no_sync(int32_t idx) {
-    if (!sampling.logits.has_data()) {
-        return model.vocab.n_tokens();
-    }
-
-    try {
-        const int64_t row = output_resolve_row(idx);
-        if ((size_t) row >= sampling.logits_count.size()) {
-            return 0;
-        }
-        return sampling.logits_count[row];
-    } catch (const std::exception & err) {
-        LLAMA_LOG_ERROR("%s: invalid backend sampled logits count id %d, reason: %s\n", __func__, idx, err.what());
-        return 0;
-    }
-}
-
 const llama_token * llama_context::get_sampled_candidates_ith(int32_t idx) {
     output_reorder();
 
@@ -1140,38 +1029,6 @@ const llama_token * llama_context::get_sampled_candidates_ith(int32_t idx) {
     }
 
     return sampling.token_ids_full_vocab.data();
-}
-
-const llama_token * llama_context::get_sampled_candidates_ith_no_sync(int32_t idx) {
-    try {
-        const int64_t row = output_resolve_row(idx);
-        if (sampling.candidates.has_data() &&
-            (size_t) row < sampling.candidates_count.size() &&
-            sampling.candidates_count[row] > 0) {
-            return sampling.candidates.data + row*model.vocab.n_tokens();
-        }
-    } catch (const std::exception & err) {
-        GGML_UNUSED(err);
-    }
-
-    return sampling.token_ids_full_vocab.data();
-}
-
-size_t llama_context::get_sampled_candidates_count_no_sync(int32_t idx) {
-    if (!sampling.candidates.has_data()) {
-        return 0;
-    }
-
-    try {
-        const int64_t row = output_resolve_row(idx);
-        if ((size_t) row >= sampling.candidates_count.size()) {
-            return 0;
-        }
-        return sampling.candidates_count[row];
-    } catch (const std::exception & err) {
-        LLAMA_LOG_ERROR("%s: invalid backend sampled candidates count id %d, reason: %s\n", __func__, idx, err.what());
-        return 0;
-    }
 }
 
 size_t llama_context::get_sampled_candidates_count(int32_t idx) {
@@ -1286,9 +1143,6 @@ void llama_context::set_embeddings_nextn(bool value, bool masked) {
 
     cparams.embeddings_nextn        = value;
     cparams.embeddings_nextn_masked = masked;
-
-    // Changing nextn extraction affects the graph outputs used by draft-MTP.
-    sched_need_reserve = true;
 }
 
 void llama_context::set_embeddings_layer_inp(uint32_t lid, bool enable) {
@@ -1304,154 +1158,6 @@ void llama_context::set_embeddings_layer_inp(uint32_t lid, bool enable) {
 
 void llama_context::set_nextn_layer_offset(int32_t offset) {
     cparams.nextn_layer_offset = offset;
-}
-
-void llama_context::set_mtp(llama_context * ctx_mtp_in) {
-    if (mtp.ctx_mtp == ctx_mtp_in) {
-        return;
-    }
-
-    if (mtp.hook_batch.pos != nullptr) {
-        if (mtp.hook_batch_embd_buffer != nullptr) {
-            mtp.hook_batch.embd = nullptr;
-        }
-        mtp.hook_batch.token = nullptr;
-        llama_batch_free(mtp.hook_batch);
-        if (mtp.hook_batch_embd_buffer != nullptr) {
-            ggml_backend_buffer_free(mtp.hook_batch_embd_buffer);
-            mtp.hook_batch_embd_buffer = nullptr;
-        }
-        mtp.hook_batch = llama_batch{};
-        mtp.hook_tokens.clear();
-    }
-
-    mtp.ctx_mtp     = ctx_mtp_in;
-    mtp.pending_pos = -1;
-
-    if (mtp.ctx_mtp) {
-        const int32_t n_ub   = (int32_t) cparams.n_ubatch;
-        const int32_t n_embd = (int32_t) model.hparams.n_embd;
-        mtp.hook_batch       = llama_batch_init(n_ub, n_embd, 1);
-#if defined(GGML_USE_CUDA) || defined(GGML_USE_HIP) || defined(GGML_USE_MUSA)
-        if (mtp.hook_batch.embd != nullptr) {
-            const size_t embd_bytes = sizeof(float) * (size_t) n_ub * (size_t) n_embd;
-            if (ggml_backend_buffer_t pinned = ggml_backend_buft_alloc_buffer(ggml_backend_cuda_host_buffer_type(), embd_bytes)) {
-                if (void * pinned_base = ggml_backend_buffer_get_base(pinned)) {
-                    free(mtp.hook_batch.embd);
-                    mtp.hook_batch.embd = (float *) pinned_base;
-                    mtp.hook_batch_embd_buffer = pinned;
-                } else {
-                    ggml_backend_buffer_free(pinned);
-                }
-            }
-        }
-#endif
-        mtp.hook_tokens.assign(n_ub, LLAMA_TOKEN_NULL);
-        mtp.hook_batch.token = mtp.hook_tokens.data();
-        mtp.pending_h.assign(n_embd, 0.0f);
-        LLAMA_LOG_INFO("%s: MTP draft head registered (ctx_mtp=%p, n_ubatch=%d, n_embd=%d)\n",
-                       __func__, (const void *) mtp.ctx_mtp, n_ub, n_embd);
-    } else {
-        mtp.hook_tokens.clear();
-        mtp.hook_tokens.shrink_to_fit();
-        mtp.pending_h.clear();
-        mtp.pending_h.shrink_to_fit();
-        LLAMA_LOG_INFO("%s: MTP draft head unregistered\n", __func__);
-    }
-}
-
-void llama_context::handle_mtp_for_ubatch(
-        int32_t              n_tokens,
-        const llama_token  * tokens,
-        const llama_pos    * positions,
-        struct ggml_tensor * t,
-        bool                 decode_mtp) {
-    if (mtp.ctx_mtp == nullptr || n_tokens == 0 || t == nullptr) {
-        return;
-    }
-    if (t->ne[1] != (int64_t) n_tokens) {
-        return;
-    }
-
-    const int64_t n_embd = model.hparams.n_embd;
-    GGML_ASSERT(t->ne[0] == n_embd);
-
-    const int       n_rows    = (int) n_tokens;
-    const llama_pos pos_start = positions[0];
-
-    const llama_pos pos_max_mtp = llama_memory_seq_pos_max(llama_get_memory(mtp.ctx_mtp), 0);
-    if (pos_start <= pos_max_mtp) {
-        llama_memory_seq_rm(llama_get_memory(mtp.ctx_mtp), 0, pos_start, -1);
-        if (mtp.pending_pos >= pos_start) {
-            mtp.pending_pos = -1;
-        }
-    }
-
-    synchronize();
-
-    const bool pending_continues = mtp.pending_pos >= 0 && mtp.pending_pos + 1 == pos_start;
-    if (mtp.pending_pos >= 0 && !pending_continues) {
-        mtp.pending_pos = -1;
-    }
-
-    const size_t row_bytes = (size_t) n_embd * sizeof(float);
-    const int    n_out     = (pending_continues ? 1 : 0) + (n_rows - 1);
-
-    if (decode_mtp && n_out > 0) {
-        int out_idx = 0;
-        if (pending_continues) {
-            std::memcpy(mtp.hook_batch.embd + (size_t) out_idx * n_embd, mtp.pending_h.data(), row_bytes);
-            mtp.hook_batch.token[out_idx]     = tokens[0];
-            mtp.hook_batch.pos[out_idx]       = pos_start;
-            mtp.hook_batch.n_seq_id[out_idx]  = 1;
-            mtp.hook_batch.seq_id[out_idx][0] = 0;
-            mtp.hook_batch.logits[out_idx]    = 0;
-            ++out_idx;
-        }
-        if (n_rows > 1) {
-            ggml_backend_t backend_t = ggml_backend_sched_get_tensor_backend(sched.get(), t);
-            GGML_ASSERT(backend_t != nullptr);
-
-            ggml_backend_tensor_get_2d_async(
-                backend_t,
-                t,
-                mtp.hook_batch.embd + (size_t) out_idx * n_embd,
-                0,
-                row_bytes,
-                (size_t) n_rows - 1,
-                row_bytes,
-                row_bytes);
-        }
-        for (int k = 0; k + 1 < n_rows; ++k) {
-            mtp.hook_batch.token[out_idx]     = tokens[k + 1];
-            mtp.hook_batch.pos[out_idx]       = positions[k + 1];
-            mtp.hook_batch.n_seq_id[out_idx]  = 1;
-            mtp.hook_batch.seq_id[out_idx][0] = 0;
-            mtp.hook_batch.logits[out_idx]    = 0;
-            ++out_idx;
-        }
-        GGML_ASSERT(out_idx == n_out);
-        mtp.hook_batch.n_tokens = n_out;
-
-        synchronize();
-
-        const int32_t rc_dec = llama_decode(mtp.ctx_mtp, mtp.hook_batch);
-        if (rc_dec != 0) {
-            LLAMA_LOG_ERROR("%s: llama_decode(ctx_mtp) failed rc=%d (pos=%d, n=%d)\n",
-                            __func__, (int) rc_dec, (int) pos_start, n_out);
-        }
-    }
-
-    ggml_backend_t backend_t = ggml_backend_sched_get_tensor_backend(sched.get(), t);
-    GGML_ASSERT(backend_t != nullptr);
-
-    ggml_backend_tensor_get_async(
-        backend_t,
-        t,
-        mtp.pending_h.data(),
-        (size_t) (n_rows - 1) * row_bytes,
-        row_bytes);
-    mtp.pending_pos = pos_start + n_rows - 1;
 }
 
 void llama_context::set_causal_attn(bool value) {
@@ -1698,16 +1404,12 @@ int llama_context::encode(const llama_batch & batch_inp) {
     // micro-batching is not possible for non-causal encoding, so we process the batch in a single shot
     GGML_ASSERT(cparams.n_ubatch >= n_tokens && "encoder requires n_ubatch >= n_tokens");
 
-    // TODO: this clear of the buffer can easily be forgotten - need something better
-    // sync first so any in-flight async copies into embd_seq complete before it is freed
-    if (!embd_seq.empty()) {
-        synchronize();
-    }
-    embd_seq.clear();
-
     if (t_compute_start_us == 0) {
         t_compute_start_us = ggml_time_us();
     }
+
+    // TODO: this clear of the buffer can easily be forgotten - need something better
+    embd_seq.clear();
 
     sched_reserve();
 
@@ -2047,18 +1749,13 @@ int llama_context::decode(const llama_batch & batch_inp) {
 
     GGML_ASSERT((cparams.causal_attn || cparams.n_ubatch >= n_tokens_all) && "non-causal attention requires n_ubatch >= n_tokens");
 
-    // TODO: this clear of the buffer can easily be forgotten - need something better
-    // sync first so any in-flight async copies into embd_seq complete before it is freed
-    if (!embd_seq.empty()) {
-        synchronize();
-    }
-    embd_seq.clear();
-
     if (t_compute_start_us == 0) {
         t_compute_start_us = ggml_time_us();
     }
     n_queued_tokens += n_tokens_all;
 
+    // TODO: this clear of the buffer can easily be forgotten - need something better
+    embd_seq.clear();
     output_swaps.clear();
 
     sched_reserve();
@@ -2283,10 +1980,6 @@ int llama_context::decode(const llama_batch & batch_inp) {
                 GGML_ASSERT((offset + n_rows)*n_embd <= (int64_t) embd_nextn.size);
                 ggml_backend_tensor_get_async(backend_h, t_h_nextn, embd_nextn_out, 0, n_rows*n_embd*sizeof(float));
             }
-        }
-
-        if (mtp.ctx_mtp != nullptr && t_h_nextn != nullptr && ubatch.token != nullptr && ubatch.pos != nullptr) {
-            handle_mtp_for_ubatch((int32_t) ubatch.n_tokens, ubatch.token, ubatch.pos, t_h_nextn, true);
         }
 
         // Copy backend sampling output if this ubatch produced any sampling tensors.
@@ -2558,7 +2251,6 @@ void llama_context::extract_layer_inputs(const llm_graph_result * res, size_t to
 
 void llama_context::output_reorder() {
     const uint64_t n_vocab    = model.vocab.n_tokens();
-    const uint64_t n_embd     = model.hparams.n_embd;
     const uint64_t n_embd_out = model.hparams.n_embd_out();
 
     for (size_t s = 0; s < output_swaps.size(); ++s) {
@@ -2572,14 +2264,14 @@ void llama_context::output_reorder() {
         }
 
         if (embd.size > 0) {
-            for (uint64_t k = 0; k < n_embd_out; k++) {
-                std::swap(embd.data[i0*n_embd_out + k], embd.data[i1*n_embd_out + k]);
+            for (uint64_t k = 0; k < n_embd; k++) {
+                std::swap(embd.data[i0*n_embd + k], embd.data[i1*n_embd + k]);
             }
         }
 
         if (embd_nextn.size > 0) {
-            for (uint64_t k = 0; k < n_embd_out; k++) {
-                std::swap(embd_nextn.data[i0*n_embd_out + k], embd_nextn.data[i1*n_embd_out + k]);
+            for (uint64_t k = 0; k < n_embd; k++) {
+                std::swap(embd_nextn.data[i0*n_embd + k], embd_nextn.data[i1*n_embd + k]);
             }
         }
 
@@ -2629,13 +2321,7 @@ void llama_context::output_reorder() {
 //
 
 uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
-    if (model.arch == LLM_ARCH_QWEN3NEXT ||
-        model.arch == LLM_ARCH_KIMI_LINEAR ||
-        model.arch == LLM_ARCH_QWEN35 ||
-        model.arch == LLM_ARCH_QWEN35MOE ||
-        model.arch == LLM_ARCH_DEEPSEEK4 ||
-        model.arch == LLM_ARCH_NANBEIGE ||
-        model.arch == LLM_ARCH_MINIMAX_M3) {
+    if (model.arch == LLM_ARCH_QWEN3NEXT || model.arch == LLM_ARCH_KIMI_LINEAR || model.arch == LLM_ARCH_QWEN35 || model.arch == LLM_ARCH_QWEN35MOE) {
         return std::max<uint32_t>(n_tokens * 40, 32u * model.n_tensors());
     }
     uint32_t res = std::max<uint32_t>(1024u, 8u*model.n_tensors());
@@ -2769,12 +2455,11 @@ llm_graph_cb llama_context::graph_get_cb() const {
             ggml_set_name(cur, name);
         }
 
-        // - norm may be automatically assigned to the backend of the previous layer, increasing data transfer between backends
-        // - force the last op of the layer on the specified backend to avoid running it on the backend of the next layer due to scheduling
+        // norm may be automatically assigned to the backend of the previous layer, increasing data transfer between backends
         // FIXME: fix in ggml_backend_sched
         const bool full_offload = model.n_gpu_layers() > model.hparams.n_layer_all;
         if (ubatch.n_tokens < 32 || full_offload) {
-            if (il != -1 && (strcmp(name, "norm") == 0 || strcmp(name, "l_last") == 0)) {
+            if (il != -1 && strcmp(name, "norm") == 0) {
                 const auto & dev_layer = model.dev_layer(il);
                 for (const auto & backend : backends) {
                     if (ggml_backend_get_device(backend.get()) == dev_layer) {
@@ -3836,22 +3521,6 @@ llama_context * llama_init_from_model(
         }
     }
 
-    if ((model->hparams.is_mla() || model->arch == LLM_ARCH_DEEPSEEK4) && params.type_k != params.type_v) {
-        LLAMA_LOG_ERROR("%s: model does not support different K (%s) and V (%s) cache types\n", __func__, ggml_type_name(params.type_k), ggml_type_name(params.type_v));
-        return nullptr;
-    }
-
-    if (ggml_is_quantized(params.type_v) && params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_ENABLED) {
-        if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO) {
-            LLAMA_LOG_INFO("%s: enabling flash_attn since it is required for quantized V cache\n", __func__);
-            params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
-        }
-        if (params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_DISABLED) {
-            LLAMA_LOG_ERROR("%s: quantized V cache requires flash_attn to be enabled\n", __func__);
-            return nullptr;
-        }
-    }
-
     if (params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED && ggml_is_quantized(params.type_k)) {
         const uint32_t blck_size = ggml_blck_size(params.type_k);
         for (uint32_t il = 0; il < model->hparams.n_layer(); ++il) {
@@ -3872,6 +3541,11 @@ llama_context * llama_init_from_model(
                 return nullptr;
             }
         }
+    }
+
+    if (ggml_is_quantized(params.type_v) && params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_DISABLED) {
+        LLAMA_LOG_ERROR("%s: V cache quantization requires flash_attn\n", __func__);
+        return nullptr;
     }
 
     if (params.pooling_type != LLAMA_POOLING_TYPE_UNSPECIFIED &&
@@ -4053,46 +3727,10 @@ float * llama_get_embeddings_nextn_ith(llama_context * ctx, int32_t i) {
     return ctx->get_embeddings_nextn_ith(i);
 }
 
-float * llama_get_embeddings_nextn_ith_no_sync(llama_context * ctx, int32_t i) {
-    return ctx->get_embeddings_nextn_ith(i);
-}
-
 float * llama_get_embeddings_layer_inp(llama_context * ctx, uint32_t lid) {
     ctx->synchronize();
 
     return ctx->get_embeddings_layer_inp(lid);
-}
-
-llama_token llama_get_sampled_token_ith_no_sync(llama_context * ctx, int32_t i) {
-    return ctx->get_sampled_token_ith_no_sync(i);
-}
-
-float * llama_get_sampled_probs_ith_no_sync(llama_context * ctx, int32_t i) {
-    return ctx->get_sampled_probs_ith_no_sync(i);
-}
-
-uint32_t llama_get_sampled_probs_count_ith_no_sync(llama_context * ctx, int32_t i) {
-    return static_cast<uint32_t>(ctx->get_sampled_probs_count_no_sync(i));
-}
-
-float * llama_get_sampled_logits_ith_no_sync(llama_context * ctx, int32_t i) {
-    return ctx->get_sampled_logits_ith_no_sync(i);
-}
-
-uint32_t llama_get_sampled_logits_count_ith_no_sync(llama_context * ctx, int32_t i) {
-    return static_cast<uint32_t>(ctx->get_sampled_logits_count_no_sync(i));
-}
-
-llama_token * llama_get_sampled_candidates_ith_no_sync(llama_context * ctx, int32_t i) {
-    return const_cast<llama_token *>(ctx->get_sampled_candidates_ith_no_sync(i));
-}
-
-uint32_t llama_get_sampled_candidates_count_ith_no_sync(llama_context * ctx, int32_t i) {
-    return static_cast<uint32_t>(ctx->get_sampled_candidates_count_no_sync(i));
-}
-
-float * llama_get_logits_ith_no_sync(llama_context * ctx, int32_t i) {
-    return ctx->get_logits_ith(i);
 }
 
 bool llama_set_sampler(llama_context * ctx, llama_seq_id seq_id, llama_sampler * smpl) {
@@ -4495,18 +4133,6 @@ void llama_opt_epoch(
 
 llama_memory_breakdown llama_get_memory_breakdown(const struct llama_context * ctx) {
     return ctx->memory_breakdown();
-}
-
-ggml_tensor * llama_context_get_t_h_pre_norm(struct llama_context * ctx) {
-    return ctx->get_t_h_pre_norm();
-}
-
-ggml_tensor * llama_context_get_t_mtp_out(struct llama_context * ctx) {
-    return ctx->get_t_mtp_out();
-}
-
-void llama_set_mtp(struct llama_context * ctx_target, struct llama_context * ctx_mtp) {
-    ctx_target->set_mtp(ctx_mtp);
 }
 
 llama_context * llama_get_ctx_other(struct llama_context * ctx) {
