@@ -174,6 +174,20 @@ typedef sycl::half2 ggml_half2;
 #define GGML_EXTENSION __extension__
 #endif // _MSC_VER
 
+// MSVC compatibility for GCC built-in functions
+#ifdef _MSC_VER
+  #include <intrin.h>
+  
+  static inline int ffs(int x) {
+    if (x == 0) return 0;
+    unsigned long result;
+    _BitScanForward(&result, x);
+    return (int)result + 1;
+  }
+  
+  #define __builtin_popcount(x) __popcnt((unsigned int)(x))
+#endif
+
 #define QK1_0 128
 typedef struct {
     ggml_half d;           // delta
