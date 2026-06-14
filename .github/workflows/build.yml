@@ -58,6 +58,7 @@ jobs:
       - name: Checkout local repository
         uses: actions/checkout@v4
         with:
+          ref: main
           submodules: recursive
           fetch-depth: 1
 
