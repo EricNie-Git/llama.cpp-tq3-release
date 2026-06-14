@@ -23,7 +23,7 @@
   
   #pragma intrinsic(_BitScanForward)
   
-  int ffs(int x) {
+  static inline int ffs(int x) {
     if (x == 0) return 0;
     unsigned long result;
     _BitScanForward(&result, x);
