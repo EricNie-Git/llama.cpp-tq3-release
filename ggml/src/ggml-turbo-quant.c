@@ -14,20 +14,6 @@
 #include <math.h>
 #include <string.h>
 
-// MSVC compatibility: provide GCC built-ins
-#ifdef _MSC_VER
-  #include <intrin.h>
-  
-  static inline int ffs(int x) {
-    if (x == 0) return 0;
-    unsigned long result;
-    _BitScanForward(&result, x);
-    return (int)result + 1;
-  }
-  
-  #define __builtin_popcount(x) __popcnt((unsigned int)(x))
-#endif
-
 #define TURBO_QJL_CONST 1.2533141373155003f
 
 static const float CENTROIDS_3BIT[8] = {
