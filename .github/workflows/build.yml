@@ -58,8 +58,6 @@ jobs:
       - name: Checkout upstream
         uses: actions/checkout@v4
         with:
-          repository: ${{ env.UPSTREAM_REPO }}
-          ref: ${{ env.UPSTREAM_BRANCH }}
           submodules: recursive
           fetch-depth: 1
 
