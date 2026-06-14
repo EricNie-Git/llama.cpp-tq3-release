@@ -21,16 +21,18 @@
 #ifdef _MSC_VER
   #include <intrin.h>
   
-  #pragma intrinsic(_BitScanForward)
-  
+  // ffs: Find First Set bit (1-indexed position)
   static inline int ffs(int x) {
     if (x == 0) return 0;
     unsigned long result;
-    _BitScanForward(&result, x);
+    _BitScanForward(&result, (unsigned int)x);
     return (int)result + 1;
   }
   
-  #define __builtin_popcount(x) __popcnt((unsigned int)(x))
+  // __builtin_popcount: Count set bits
+  static inline int __builtin_popcount(unsigned int x) {
+    return (int)__popcnt(x);
+  }
 #endif
 
 #define GROUP_MAX_EPS 1e-15f
