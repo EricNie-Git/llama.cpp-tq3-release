@@ -214,7 +214,7 @@ jobs:
       - name: Configure CMake
         shell: pwsh
         run: |
-          cmake -B build `
+          cmake -B build --fresh `
             -G Ninja `
             -DCMAKE_BUILD_TYPE=${{ inputs.build_type }} `
             -DGGML_CUDA=ON `
