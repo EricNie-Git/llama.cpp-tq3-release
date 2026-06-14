@@ -233,7 +233,7 @@ jobs:
       - name: Configure CMake
         shell: pwsh
         run: |
-          cmake -B build --fresh `
+          cmake -B build `
             -G Ninja `
             -DCMAKE_BUILD_TYPE=${{ inputs.build_type }} `
             -DGGML_CUDA=ON `
@@ -353,7 +353,7 @@ jobs:
 
       - name: Upload to Release
         run: |
-          gh release create nightly "${{ runner.temp }}/llama.cpp-tq3-windows-x64-cuda${{ inputs.cuda_version }}-${{ inputs.build_type }}.zip" --title "Nightly Build" --prerelease --notes "Autobuild" --repo EricNie-Git/llama.cpp-tq3-autobuild || true
-          gh release upload nightly "${{ runner.temp }}/llama.cpp-tq3-windows-x64-cuda${{ inputs.cuda_version }}-${{ inputs.build_type }}.zip" --clobber --repo EricNie-Git/llama.cpp-tq3-autobuild
+          gh release create nightly "${{ runner.temp }}/llama.cpp-tq3-windows-x64-cuda${{ inputs.cuda_version }}-${{ inputs.build_type }}.zip" --title "Nightly Build" --prerelease --notes "Autobuild" --repo EricNie-Git/llama.cpp-tq3-release || true
+          gh release upload nightly "${{ runner.temp }}/llama.cpp-tq3-windows-x64-cuda${{ inputs.cuda_version }}-${{ inputs.build_type }}.zip" --clobber --repo EricNie-Git/llama.cpp-tq3-release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
