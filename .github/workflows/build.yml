@@ -212,15 +212,23 @@ jobs:
         uses: seanmiddleditch/gha-setup-ninja@v5
 
       - name: DEBUG - Verify MSVC fix in source
-        shell: bash
+        shell: pwsh
         run: |
-          echo "=== ggml-common.h has ffs? ==="
-          grep -c "ffs" ggml/src/ggml-common.h
-          echo "=== ggml-quants.c has ffs? ==="
-          grep -c "ffs" ggml/src/ggml-quants.c
-          echo "=== ggml-turbo-quant.c has ffs? ==="
-          grep -c "ffs" ggml/src/ggml-turbo-quant.c 2>/dev/null || echo "file not found"
-
+          Write-Host "=== Current branch ==="
+          git branch --show-current
+          Write-Host "=== git log last 3 ==="
+          git log --oneline -3
+          Write-Host "=== ggml-common.h has ffs? ==="
+          Select-String -Path "ggml/src/ggml-common.h" -Pattern "ffs"
+          Write-Host "=== ggml-quants.c has ffs? ==="
+          Select-String -Path "ggml/src/ggml-quants.c" -Pattern "ffs"
+          Write-Host "=== ggml-turbo-quant.c has ffs? ==="
+          if (Test-Path "ggml/src/ggml-turbo-quant.c") {
+            Select-String -Path "ggml/src/ggml-turbo-quant.c" -Pattern "ffs"
+          } else {
+            Write-Host "file not found"
+          }
+    
       - name: Configure CMake
         shell: pwsh
         run: |
