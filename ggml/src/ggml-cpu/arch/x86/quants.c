@@ -1,5 +1,22 @@
 #define GGML_COMMON_IMPL_C
 #include "ggml-common.h"
+
+// MSVC compatibility: provide GCC built-ins
+#ifdef _MSC_VER
+  #include <intrin.h>
+  
+  #pragma intrinsic(_BitScanForward)
+  
+  static inline int ffs(int x) {
+    if (x == 0) return 0;
+    unsigned long result;
+    _BitScanForward(&result, x);
+    return (int)result + 1;
+  }
+  
+  #define __builtin_popcount(x) __popcnt((unsigned int)(x))
+#endif
+
 #include "ggml-quants.h"
 #include "ggml-impl.h"
 #include "ggml-cpu.h"
