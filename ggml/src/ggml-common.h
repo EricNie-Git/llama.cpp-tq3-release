@@ -178,7 +178,7 @@ typedef sycl::half2 ggml_half2;
 #ifdef _MSC_VER
   #include <intrin.h>
   
-  inline int ffs(int x) {
+  static inline int ffs(int x) {
     if (x == 0) return 0;
     unsigned long result;
     _BitScanForward(&result, x);
