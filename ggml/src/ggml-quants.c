@@ -17,24 +17,6 @@
 #include <omp.h>
 #endif
 
-// MSVC compatibility: provide GCC built-ins
-#ifdef _MSC_VER
-  #include <intrin.h>
-  
-  // ffs: Find First Set bit (1-indexed position)
-  static inline int ffs(int x) {
-    if (x == 0) return 0;
-    unsigned long result;
-    _BitScanForward(&result, (unsigned int)x);
-    return (int)result + 1;
-  }
-  
-  // __builtin_popcount: Count set bits
-  static inline int __builtin_popcount(unsigned int x) {
-    return (int)__popcnt(x);
-  }
-#endif
-
 #define GROUP_MAX_EPS 1e-15f
 #define GROUP_MAX_EPS_IQ3_XXS 1e-8f
 #define GROUP_MAX_EPS_IQ2_S 1e-8f
