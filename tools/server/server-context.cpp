@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cinttypes>
+#include <cstring>
 #include <exception>
 #include <memory>
 #include <filesystem>
@@ -47,6 +48,14 @@ static uint32_t server_n_outputs_max(const common_params & params) {
 
     if (params.embedding ||
             (params.pooling_type != LLAMA_POOLING_TYPE_UNSPECIFIED && params.pooling_type != LLAMA_POOLING_TYPE_NONE)) {
+        return n_batch;
+    }
+
+    const bool spec_mtp = std::find(params.speculative.types.begin(), params.speculative.types.end(),
+                                    COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.speculative.types.end()
+                       || std::find(params.speculative.types.begin(), params.speculative.types.end(),
+                                    COMMON_SPECULATIVE_TYPE_MTP) != params.speculative.types.end();
+    if (spec_mtp) {
         return n_batch;
     }
 
@@ -814,7 +823,10 @@ private:
         if (params_base.fit_params) {
             const bool spec_mtp = std::find(params_base.speculative.types.begin(),
                                             params_base.speculative.types.end(),
-                                            COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end();
+                                            COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end()
+                               || std::find(params_base.speculative.types.begin(),
+                                            params_base.speculative.types.end(),
+                                            COMMON_SPECULATIVE_TYPE_MTP) != params_base.speculative.types.end();
             const bool has_draft = params_base.speculative.has_dft();
 
             if (has_draft || spec_mtp) {
@@ -890,6 +902,17 @@ private:
             }
         }
 
+        if (std::find(params_base.speculative.types.begin(), params_base.speculative.types.end(),
+                      COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end()
+            || std::find(params_base.speculative.types.begin(), params_base.speculative.types.end(),
+                      COMMON_SPECULATIVE_TYPE_MTP) != params_base.speculative.types.end()) {
+            string_parse_kv_override("llama.nomtp_trunk_only=bool:true", params_base.kv_overrides);
+            if (params_base.kv_overrides.empty() || params_base.kv_overrides.back().key[0] != 0) {
+                params_base.kv_overrides.emplace_back();
+                params_base.kv_overrides.back().key[0] = 0;
+            }
+        }
+
         llama_init = common_init_from_params(params_base);
 
         model_tgt = llama_init->model();
@@ -939,7 +962,10 @@ private:
 
             const bool spec_mtp = std::find(params_base.speculative.types.begin(),
                                             params_base.speculative.types.end(),
-                                            COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end();
+                                            COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end()
+                               || std::find(params_base.speculative.types.begin(),
+                                            params_base.speculative.types.end(),
+                                            COMMON_SPECULATIVE_TYPE_MTP) != params_base.speculative.types.end();
 
             if (spec_mtp) {
                 cparams.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
@@ -955,19 +981,54 @@ private:
             params_base.speculative.draft.ctx_tgt = ctx_tgt;
             params_base.speculative.draft.ctx_dft = ctx_dft.get();
         } else if (std::find(params_base.speculative.types.begin(), params_base.speculative.types.end(),
-                             COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end()) {
-            SRV_INF("creating MTP draft context against the target model '%s'\n",
-                    params_base.model.path.c_str());
+                             COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end()
+               || std::find(params_base.speculative.types.begin(), params_base.speculative.types.end(),
+                             COMMON_SPECULATIVE_TYPE_MTP) != params_base.speculative.types.end()) {
+            char trunk_arch[64] = {0};
+            llama_model_meta_val_str(model_tgt, "general.architecture", trunk_arch, sizeof(trunk_arch));
+
+            const char * mtp_arch = nullptr;
+            if (std::string(trunk_arch) == "qwen35") {
+                mtp_arch = "qwen35_mtp";
+            } else {
+                SRV_ERR("MTP not supported for trunk architecture '%s'\n", trunk_arch);
+                return false;
+            }
+
+            SRV_INF("loading MTP head from '%s' (override_arch=%s)\n",
+                    params_base.model.path.c_str(), mtp_arch);
+
+            auto params_mtp = params_base;
+            params_mtp.kv_overrides.erase(
+                    std::remove_if(params_mtp.kv_overrides.begin(), params_mtp.kv_overrides.end(), [](const llama_model_kv_override & ovrd) {
+                        return ovrd.key[0] == 0 ||
+                               std::strcmp(ovrd.key, "llama.nomtp_trunk_only") == 0 ||
+                               std::strcmp(ovrd.key, "llama.mtp_only") == 0;
+                    }),
+                    params_mtp.kv_overrides.end());
+            string_parse_kv_override("llama.mtp_only=bool:true", params_mtp.kv_overrides);
+            if (params_mtp.kv_overrides.empty() || params_mtp.kv_overrides.back().key[0] != 0) {
+                params_mtp.kv_overrides.emplace_back();
+                params_mtp.kv_overrides.back().key[0] = 0;
+            }
+
+            auto mparams_mtp = common_model_params_to_llama(params_mtp);
+
+            model_dft.reset(llama_model_load_from_file(params_base.model.path.c_str(), mparams_mtp));
+            if (model_dft == nullptr) {
+                SRV_ERR("failed to load MTP head from '%s'\n", params_base.model.path.c_str());
+                return false;
+            }
 
             auto cparams_mtp = common_context_params_to_llama(params_base);
             cparams_mtp.ctx_type      = LLAMA_CONTEXT_TYPE_MTP;
-            cparams_mtp.type_k        = params_base.speculative.draft.cache_type_k;
-            cparams_mtp.type_v        = params_base.speculative.draft.cache_type_v;
+            cparams_mtp.type_k        = params_base.cache_type_k;
+            cparams_mtp.type_v        = params_base.cache_type_v;
             cparams_mtp.n_rs_seq      = 0;
             cparams_mtp.n_outputs_max = params_base.n_parallel;
             cparams_mtp.ctx_other     = ctx_tgt;
 
-            ctx_dft.reset(llama_init_from_model(model_tgt, cparams_mtp));
+            ctx_dft.reset(llama_init_from_model(model_dft.get(), cparams_mtp));
             if (ctx_dft == nullptr) {
                 SRV_ERR("%s", "failed to create MTP context\n");
                 return false;
@@ -1364,14 +1425,19 @@ private:
             if (update_cache) {
                 SRV_INF("%s", "updating prompt cache\n");
 
-                const int64_t t_start = ggml_time_us();
-
+                const int64_t t_start = ggml_time_us();                // Save the current slot's KV to cache-ram (frees VRAM), if any
                 const bool saved_prompt = ret->prompt_save(*prompt_cache);
 
-                if (saved_prompt && !ret->prompt_load(*prompt_cache, task.tokens)) {
-                    ret->prompt_clear(false);
+                // Always try to load the target prompt from cache-ram.
+                // This is needed even when saved_prompt is false (e.g. cache-idle-slots
+                // already cleared the slot's tokens in process_single_task but the KV
+                // was previously saved to cache-ram).
+                if (!ret->prompt_load(*prompt_cache, task.tokens)) {
+                    // If we saved something but couldn't load, clear the slot
+                    if (saved_prompt) {
+                        ret->prompt_clear(false);
+                    }
                 }
-
                 if (saved_prompt) {
                     prompt_cache->update();
                 }
@@ -3044,7 +3110,7 @@ private:
                             cur_tok,
                             slot.prompt.tokens.pos_next(),
                             { slot.id },
-                            slot.need_embd());
+                            slot.need_embd() || slot.need_embd_nextn());
                         slot.prompt.tokens.push_back(cur_tok);
 
                         slot.n_prompt_tokens_processed++;
