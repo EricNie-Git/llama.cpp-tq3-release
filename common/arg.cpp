@@ -1268,8 +1268,8 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         {"--version"},
         "show version and build info",
         [](common_params &) {
-            fprintf(stderr, "version: %d (%s)\n", llama_build_number(), llama_commit());
-            fprintf(stderr, "built with %s for %s\n", llama_compiler(), llama_build_target());
+            fprintf(stdout, "version: %d (%s)\n", llama_build_number(), llama_commit());
+            fprintf(stdout, "built with %s for %s\n", llama_compiler(), llama_build_target());
             exit(0);
         }
     ));
@@ -3487,20 +3487,6 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             common_log_set_file(common_log_main(), value.c_str());
         }
     ).set_env("LLAMA_ARG_LOG_FILE"));
-    add_opt(common_arg(
-        {"--log-prompts-dir"}, "PATH",
-        "Log prompts to directory (only used for debugging, default: disabled)",
-        [](common_params & params, const std::string & value) {
-            params.path_prompts_log_dir = value;
-        }
-    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
-    add_opt(common_arg(
-        {"--log-prompts-dir"}, "PATH",
-        "Log prompts to directory (only used for debugging, default: disabled)",
-        [](common_params & params, const std::string & value) {
-            params.path_prompts_log_dir = value;
-        }
-    ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
     add_opt(common_arg(
         {"--log-prompts-dir"}, "PATH",
         "Log prompts to directory (only used for debugging, default: disabled)",
