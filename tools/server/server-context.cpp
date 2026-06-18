@@ -54,7 +54,7 @@ static uint32_t server_n_outputs_max(const common_params & params) {
     const bool spec_mtp = std::find(params.speculative.types.begin(), params.speculative.types.end(),
                                     COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.speculative.types.end()
                        || std::find(params.speculative.types.begin(), params.speculative.types.end(),
-                                    COMMON_SPECULATIVE_TYPE_MTP) != params.speculative.types.end();
+                                    COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.speculative.types.end();
     if (spec_mtp) {
         return n_batch;
     }
@@ -64,6 +64,28 @@ static uint32_t server_n_outputs_max(const common_params & params) {
     const uint64_t n_outputs = (uint64_t) params.n_parallel * n_outputs_per_seq;
 
     return std::max<uint32_t>(1, std::min<uint64_t>(n_batch, n_outputs));
+}
+
+static common_context_seq_rm_type server_seq_rm_type_for_startup(llama_context * ctx, bool warmup_enabled) {
+    if (ctx == nullptr) {
+        return COMMON_CONTEXT_SEQ_RM_TYPE_NO;
+    }
+
+    if (warmup_enabled) {
+        return common_context_can_seq_rm(ctx);
+    }
+
+    if (llama_get_memory(ctx) == nullptr) {
+        return COMMON_CONTEXT_SEQ_RM_TYPE_NO;
+    }
+
+    // Avoid decode-based probing during --no-warmup startup. Use the most
+    // conservative rollback mode that still keeps speculative decoding usable.
+    if (llama_n_rs_seq(ctx) > 0) {
+        return COMMON_CONTEXT_SEQ_RM_TYPE_RS;
+    }
+
+    return COMMON_CONTEXT_SEQ_RM_TYPE_FULL;
 }
 
 // state diagram: https://github.com/ggml-org/llama.cpp/pull/9283
@@ -826,7 +848,7 @@ private:
                                             COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end()
                                || std::find(params_base.speculative.types.begin(),
                                             params_base.speculative.types.end(),
-                                            COMMON_SPECULATIVE_TYPE_MTP) != params_base.speculative.types.end();
+                                            COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end();
             const bool has_draft = params_base.speculative.has_dft();
 
             if (has_draft || spec_mtp) {
@@ -905,7 +927,7 @@ private:
         if (std::find(params_base.speculative.types.begin(), params_base.speculative.types.end(),
                       COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end()
             || std::find(params_base.speculative.types.begin(), params_base.speculative.types.end(),
-                      COMMON_SPECULATIVE_TYPE_MTP) != params_base.speculative.types.end()) {
+                      COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end()) {
             string_parse_kv_override("llama.nomtp_trunk_only=bool:true", params_base.kv_overrides);
             if (params_base.kv_overrides.empty() || params_base.kv_overrides.back().key[0] != 0) {
                 params_base.kv_overrides.emplace_back();
@@ -965,7 +987,7 @@ private:
                                             COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end()
                                || std::find(params_base.speculative.types.begin(),
                                             params_base.speculative.types.end(),
-                                            COMMON_SPECULATIVE_TYPE_MTP) != params_base.speculative.types.end();
+                                            COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end();
 
             if (spec_mtp) {
                 cparams.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
@@ -983,7 +1005,7 @@ private:
         } else if (std::find(params_base.speculative.types.begin(), params_base.speculative.types.end(),
                              COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end()
                || std::find(params_base.speculative.types.begin(), params_base.speculative.types.end(),
-                             COMMON_SPECULATIVE_TYPE_MTP) != params_base.speculative.types.end()) {
+                             COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end()) {
             char trunk_arch[64] = {0};
             llama_model_meta_val_str(model_tgt, "general.architecture", trunk_arch, sizeof(trunk_arch));
 
@@ -1098,7 +1120,7 @@ private:
 
         slots.clear();
 
-        ctx_tgt_seq_rm_type = common_context_can_seq_rm(ctx_tgt);
+        ctx_tgt_seq_rm_type = server_seq_rm_type_for_startup(ctx_tgt, params_base.warmup);
         if (ctx_tgt_seq_rm_type == COMMON_CONTEXT_SEQ_RM_TYPE_NO) {
             SRV_WRN("%s", "speculative decoding not supported by this context\n");
         }
@@ -1122,7 +1144,7 @@ private:
         }
 
         if (ctx_dft) {
-            ctx_dft_seq_rm_type = common_context_can_seq_rm(ctx_dft.get());
+            ctx_dft_seq_rm_type = server_seq_rm_type_for_startup(ctx_dft.get(), params_base.warmup);
         }
 
         if (spec) {
@@ -1855,7 +1877,8 @@ private:
             res->is_begin = true;
         } else {
             res->content = tkn.text_to_send;
-            res->tokens  = { tkn.tok };
+            res->tokens.clear();
+            res->tokens.push_back(tkn.tok);
         }
 
         res->n_decoded             = slot.n_decoded;
@@ -2556,6 +2579,10 @@ private:
         std::vector<server_slot *> generating;
         std::vector<server_slot *> drafting;
 
+        const uint32_t spec_ckpt_flags =
+            LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY |
+            ((params_base.n_ctx_checkpoints == 0 && params_base.cache_ram_mib == 0) ? LLAMA_STATE_SEQ_FLAGS_ON_DEVICE : 0);
+
         // determine which slots are generating and drafting
         for (auto & slot : slots) {
             if (slot.state != SLOT_STATE_GENERATING) {
@@ -2596,7 +2623,7 @@ private:
                                 llama_memory_seq_pos_max(llama_get_memory(ctx_tgt), slot.id));
 
                         if (use_ckpt_dft) {
-                            slot.spec_ckpt.update_dft(ctx_dft.get(), slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                            slot.spec_ckpt.update_dft(ctx_dft.get(), slot.id, spec_ckpt_flags);
                         }
 
                         slot.spec_prompt = slot.prompt.tokens.get_text_tokens();
@@ -2635,7 +2662,7 @@ private:
 
             if (ctx_dft) {
                 if (use_ckpt_dft) {
-                    ckpt.load_dft(ctx_dft.get(), slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                    ckpt.load_dft(ctx_dft.get(), slot.id, spec_ckpt_flags);
                 }
 
                 common_context_seq_rm(ctx_dft.get(), slot.id, ckpt.pos_max + 1, -1);
@@ -2652,7 +2679,7 @@ private:
                 if (use_ckpt_tgt) {
                     //const int64_t t_start = ggml_time_us();
 
-                    ckpt.update_tgt(ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                    ckpt.update_tgt(ctx_tgt, slot.id, spec_ckpt_flags);
 
                     //const int64_t t_total = ggml_time_us() - t_start;
                     //printf("checkpoint total: %f ms\n", t_total / 1000.0);
@@ -2664,7 +2691,7 @@ private:
                 }
 
                 if (use_ckpt_dft) {
-                    ckpt.update_dft(ctx_dft.get(), slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                    ckpt.update_dft(ctx_dft.get(), slot.id, spec_ckpt_flags);
                 }
             }
         }
@@ -3536,13 +3563,13 @@ private:
                             SLT_DBG(slot, "restoring speculative checkpoint (pos_min = %d, pos_max = %d, size = %zu)\n", ckpt.pos_min, ckpt.pos_max, ckpt.size());
 
                             {
-                                ckpt.load_tgt(slot.ctx_tgt, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                                ckpt.load_tgt(slot.ctx_tgt, slot.id, spec_ckpt_flags);
 
                                 common_context_seq_rm(slot.ctx_tgt, slot.id, ckpt.pos_max + 1, -1);
                             }
 
                             if (slot.ctx_dft) {
-                                ckpt.load_dft(slot.ctx_dft, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
+                                ckpt.load_dft(slot.ctx_dft, slot.id, spec_ckpt_flags);
 
                                 common_context_seq_rm(slot.ctx_dft, slot.id, ckpt.pos_max + 1, -1);
                             }
