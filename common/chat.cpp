@@ -1714,6 +1714,11 @@ static common_chat_params common_chat_params_init_lfm2(const common_chat_templat
                              tmpl.source().find(THINK_START) != std::string::npos;
     auto include_grammar   = has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE;
 
+    auto has_tools         = inputs.tools.is_array() && !inputs.tools.empty();
+    auto extract_reasoning = inputs.reasoning_format != COMMON_REASONING_FORMAT_NONE &&
+                             tmpl.source().find(THINK_START) != std::string::npos;
+    auto include_grammar   = has_tools && inputs.tool_choice != COMMON_CHAT_TOOL_CHOICE_NONE;
+
     if (inputs.has_continuation()) {
         const auto & msg = inputs.continue_msg;
 
