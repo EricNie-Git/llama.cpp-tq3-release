@@ -1,6 +1,10 @@
 #include "llama-context.h"
 
 #include "ggml.h"
+#include "../ggml/include/ggml-backend.h"
+#if defined(GGML_USE_CUDA) || defined(GGML_USE_HIP) || defined(GGML_USE_MUSA)
+#include "../ggml/include/ggml-cuda.h"
+#endif
 #include "llama-arch.h"
 #include "llama-graph.h"
 #include "llama-impl.h"
@@ -950,6 +954,14 @@ float * llama_context::get_embeddings_nextn_ith(int32_t i) {
     }
 }
 
+ggml_tensor * llama_context::get_t_h_pre_norm() const {
+    return gf_res_prev ? gf_res_prev->t_h_pre_norm : nullptr;
+}
+
+ggml_tensor * llama_context::get_t_mtp_out() const {
+    return gf_res_prev ? gf_res_prev->t_mtp_out : nullptr;
+}
+
 float * llama_context::get_embeddings_layer_inp(uint32_t lid) {
     output_reorder();
 
@@ -1157,6 +1169,154 @@ void llama_context::set_embeddings_layer_inp(uint32_t lid, bool enable) {
 
     // note: without this reserve, the draft acceptance drops to zero. not sure why - this is unexpected
     sched_need_reserve = true;
+}
+
+void llama_context::set_mtp(llama_context * ctx_mtp_in) {
+    if (mtp.ctx_mtp == ctx_mtp_in) {
+        return;
+    }
+
+    if (mtp.hook_batch.pos != nullptr) {
+        if (mtp.hook_batch_embd_buffer != nullptr) {
+            mtp.hook_batch.embd = nullptr;
+        }
+        mtp.hook_batch.token = nullptr;
+        llama_batch_free(mtp.hook_batch);
+        if (mtp.hook_batch_embd_buffer != nullptr) {
+            ggml_backend_buffer_free(mtp.hook_batch_embd_buffer);
+            mtp.hook_batch_embd_buffer = nullptr;
+        }
+        mtp.hook_batch = llama_batch{};
+        mtp.hook_tokens.clear();
+    }
+
+    mtp.ctx_mtp     = ctx_mtp_in;
+    mtp.pending_pos = -1;
+
+    if (mtp.ctx_mtp) {
+        const int32_t n_ub   = (int32_t) cparams.n_ubatch;
+        const int32_t n_embd = (int32_t) model.hparams.n_embd;
+        mtp.hook_batch       = llama_batch_init(n_ub, n_embd, 1);
+#if defined(GGML_USE_CUDA) || defined(GGML_USE_HIP) || defined(GGML_USE_MUSA)
+        if (mtp.hook_batch.embd != nullptr) {
+            const size_t embd_bytes = sizeof(float) * (size_t) n_ub * (size_t) n_embd;
+            if (ggml_backend_buffer_t pinned = ggml_backend_buft_alloc_buffer(ggml_backend_cuda_host_buffer_type(), embd_bytes)) {
+                if (void * pinned_base = ggml_backend_buffer_get_base(pinned)) {
+                    free(mtp.hook_batch.embd);
+                    mtp.hook_batch.embd = (float *) pinned_base;
+                    mtp.hook_batch_embd_buffer = pinned;
+                } else {
+                    ggml_backend_buffer_free(pinned);
+                }
+            }
+        }
+#endif
+        mtp.hook_tokens.assign(n_ub, LLAMA_TOKEN_NULL);
+        mtp.hook_batch.token = mtp.hook_tokens.data();
+        mtp.pending_h.assign(n_embd, 0.0f);
+        LLAMA_LOG_INFO("%s: MTP draft head registered (ctx_mtp=%p, n_ubatch=%d, n_embd=%d)\n",
+                       __func__, (const void *) mtp.ctx_mtp, n_ub, n_embd);
+    } else {
+        mtp.hook_tokens.clear();
+        mtp.hook_tokens.shrink_to_fit();
+        mtp.pending_h.clear();
+        mtp.pending_h.shrink_to_fit();
+        LLAMA_LOG_INFO("%s: MTP draft head unregistered\n", __func__);
+    }
+}
+
+void llama_context::handle_mtp_for_ubatch(
+        int32_t              n_tokens,
+        const llama_token  * tokens,
+        const llama_pos    * positions,
+        struct ggml_tensor * t,
+        bool                 decode_mtp) {
+    if (mtp.ctx_mtp == nullptr || n_tokens == 0 || t == nullptr) {
+        return;
+    }
+    if (t->ne[1] != (int64_t) n_tokens) {
+        return;
+    }
+
+    const int64_t n_embd = model.hparams.n_embd;
+    GGML_ASSERT(t->ne[0] == n_embd);
+
+    const int       n_rows    = (int) n_tokens;
+    const llama_pos pos_start = positions[0];
+
+    const llama_pos pos_max_mtp = llama_memory_seq_pos_max(llama_get_memory(mtp.ctx_mtp), 0);
+    if (pos_start <= pos_max_mtp) {
+        llama_memory_seq_rm(llama_get_memory(mtp.ctx_mtp), 0, pos_start, -1);
+        if (mtp.pending_pos >= pos_start) {
+            mtp.pending_pos = -1;
+        }
+    }
+
+    synchronize();
+
+    const bool pending_continues = mtp.pending_pos >= 0 && mtp.pending_pos + 1 == pos_start;
+    if (mtp.pending_pos >= 0 && !pending_continues) {
+        mtp.pending_pos = -1;
+    }
+
+    const size_t row_bytes = (size_t) n_embd * sizeof(float);
+    const int    n_out     = (pending_continues ? 1 : 0) + (n_rows - 1);
+
+    if (decode_mtp && n_out > 0) {
+        int out_idx = 0;
+        if (pending_continues) {
+            std::memcpy(mtp.hook_batch.embd + (size_t) out_idx * n_embd, mtp.pending_h.data(), row_bytes);
+            mtp.hook_batch.token[out_idx]     = tokens[0];
+            mtp.hook_batch.pos[out_idx]       = pos_start;
+            mtp.hook_batch.n_seq_id[out_idx]  = 1;
+            mtp.hook_batch.seq_id[out_idx][0] = 0;
+            mtp.hook_batch.logits[out_idx]    = 0;
+            ++out_idx;
+        }
+        if (n_rows > 1) {
+            ggml_backend_t backend_t = ggml_backend_sched_get_tensor_backend(sched.get(), t);
+            GGML_ASSERT(backend_t != nullptr);
+
+            ggml_backend_tensor_get_2d_async(
+                backend_t,
+                t,
+                mtp.hook_batch.embd + (size_t) out_idx * n_embd,
+                0,
+                row_bytes,
+                (size_t) n_rows - 1,
+                row_bytes,
+                row_bytes);
+        }
+        for (int k = 0; k + 1 < n_rows; ++k) {
+            mtp.hook_batch.token[out_idx]     = tokens[k + 1];
+            mtp.hook_batch.pos[out_idx]       = positions[k + 1];
+            mtp.hook_batch.n_seq_id[out_idx]  = 1;
+            mtp.hook_batch.seq_id[out_idx][0] = 0;
+            mtp.hook_batch.logits[out_idx]    = 0;
+            ++out_idx;
+        }
+        GGML_ASSERT(out_idx == n_out);
+        mtp.hook_batch.n_tokens = n_out;
+
+        synchronize();
+
+        const int32_t rc_dec = llama_decode(mtp.ctx_mtp, mtp.hook_batch);
+        if (rc_dec != 0) {
+            LLAMA_LOG_ERROR("%s: llama_decode(ctx_mtp) failed rc=%d (pos=%d, n=%d)\n",
+                            __func__, (int) rc_dec, (int) pos_start, n_out);
+        }
+    }
+
+    ggml_backend_t backend_t = ggml_backend_sched_get_tensor_backend(sched.get(), t);
+    GGML_ASSERT(backend_t != nullptr);
+
+    ggml_backend_tensor_get_async(
+        backend_t,
+        t,
+        mtp.pending_h.data(),
+        (size_t) (n_rows - 1) * row_bytes,
+        row_bytes);
+    mtp.pending_pos = pos_start + n_rows - 1;
 }
 
 void llama_context::set_causal_attn(bool value) {
@@ -1979,6 +2139,10 @@ int llama_context::decode(const llama_batch & batch_inp) {
                 GGML_ASSERT((offset + n_rows)*n_embd <= (int64_t) embd_nextn.size);
                 ggml_backend_tensor_get_async(backend_h, t_h_nextn, embd_nextn_out, 0, n_rows*n_embd*sizeof(float));
             }
+        }
+
+        if (mtp.ctx_mtp != nullptr && t_h_nextn != nullptr && ubatch.token != nullptr && ubatch.pos != nullptr) {
+            handle_mtp_for_ubatch((int32_t) ubatch.n_tokens, ubatch.token, ubatch.pos, t_h_nextn, true);
         }
 
         // Copy backend sampling output if this ubatch produced any sampling tensors.
@@ -4129,6 +4293,18 @@ void llama_opt_epoch(
 
 llama_memory_breakdown llama_get_memory_breakdown(const struct llama_context * ctx) {
     return ctx->memory_breakdown();
+}
+
+ggml_tensor * llama_context_get_t_h_pre_norm(struct llama_context * ctx) {
+    return ctx->get_t_h_pre_norm();
+}
+
+ggml_tensor * llama_context_get_t_mtp_out(struct llama_context * ctx) {
+    return ctx->get_t_mtp_out();
+}
+
+void llama_set_mtp(struct llama_context * ctx_target, struct llama_context * ctx_mtp) {
+    ctx_target->set_mtp(ctx_mtp);
 }
 
 llama_context * llama_get_ctx_other(struct llama_context * ctx) {

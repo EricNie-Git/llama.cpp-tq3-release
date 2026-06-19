@@ -1465,7 +1465,10 @@ bool llama_model_base::load_tensors(llama_model_loader & ml) {
             }
         }
     }
-    ml.done_getting_tensors();
+    const bool partial_nextn_load =
+            (arch == LLM_ARCH_QWEN35 || arch == LLM_ARCH_QWEN35MOE) &&
+            (hparams.trunk_only_nomtp || hparams.mtp_only);
+    ml.done_getting_tensors(partial_nextn_load);
 
     GGML_ASSERT(!(output && tok_embd &&
             strcmp(output->name, tok_embd->name) == 0 &&
