@@ -510,6 +510,14 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
             break;
     }
 
+    // Asymmetric turbo V (K != V type): turbo types have no GPU to_fp16 conversion,
+    // so the MMA_F16 tile path would dereference a null function pointer. Force VEC.
+    const bool asymm_turbo_v = (V->type == GGML_TYPE_TURBO3_0 || V->type == GGML_TYPE_TURBO4_0) &&
+                               K->type != V->type;
+    if (asymm_turbo_v) {
+        return can_use_vector_kernel ? BEST_FATTN_KERNEL_VEC : BEST_FATTN_KERNEL_NONE;
+    }
+
     // If Turing tensor cores are available, use them:
     if (turing_mma_available(cc) && Q->ne[0] != 40 && Q->ne[0] != 72) {
         if (can_use_vector_kernel) {
