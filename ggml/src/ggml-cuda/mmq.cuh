@@ -2,6 +2,7 @@
 
 #include "common.cuh"
 
+#include <cfloat>
 #include <climits>
 #include <cstdint>
 
