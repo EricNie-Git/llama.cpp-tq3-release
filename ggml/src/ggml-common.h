@@ -173,6 +173,9 @@ typedef sycl::half2 ggml_half2;
 #else // _MSC_VER
 #define GGML_EXTENSION __extension__
 #endif // _MSC_VER
+#ifdef _MSC_VER
+#define __builtin_popcount(x) __popcnt((unsigned int)(x))
+#endif
 
 #define QK1_0 128
 typedef struct {
