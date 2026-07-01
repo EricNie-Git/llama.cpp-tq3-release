@@ -1,0 +1,337 @@
+name: Build llama.cpp-tq3 (Windows CUDA)
+permissions:
+  contents: write
+on:
+  workflow_dispatch:
+    inputs:
+      cuda_version:
+        description: 'CUDA Toolkit version (CUDA 12.x only)'
+        required: true
+        default: '12.8.1'
+        type: choice
+        options:
+          - '12.8.1'
+      build_type:
+        description: 'Build type'
+        required: true
+        default: 'Release'
+        type: choice
+        options:
+          - 'Release'
+          - 'RelWithDebInfo'
+      cuda_arch:
+        description: 'CUDA architectures semicolon-separated'
+        required: true
+        default: '52;61;75;80;86;89;90'
+        type: string
+      build_server:
+        description: 'Build llama-server'
+        required: true
+        default: true
+        type: boolean
+      build_tools:
+        description: 'Build CLI tools (llama-cli, llama-bench, quantize, etc.)'
+        required: true
+        default: true
+        type: boolean
+      build_examples:
+        description: 'Build examples'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows-cuda:
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+
+    steps:
+      - name: Checkout local repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Setup CUDA Toolkit (ZIP redistributables from NVIDIA)
+        shell: pwsh
+        run: |
+          # =============================================================
+          # CUDA 12.8.1 redistributable component versions
+          # (from developer.download.nvidia.com/compute/cuda/redist/)
+          # =============================================================
+          $cudaVersion = "12.8.1"
+          $cudaShort   = "12.8"
+
+          # Build numbers for CUDA 12.8.1 (highest 12.8.x build = patch 1)
+          $ver_nvcc    = "12.8.93"
+          $ver_cudart  = "12.8.90"
+          $ver_nvrtc   = "12.8.93"
+          $ver_nvtx    = "12.8.90"
+          $ver_profapi = "12.8.90"
+          $ver_cccl    = "12.8.90"
+          $ver_cublas  = "12.8.4.1"
+
+          $REDIST_BASE = "https://developer.download.nvidia.com/compute/cuda/redist"
+          $cudaDir = "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v$cudaShort"
+
+          Write-Host "=== CUDA $cudaVersion Toolkit - ZIP redistributable install ==="
+          Write-Host "Target: $cudaDir"
+          Write-Host ""
+
+          # -----------------------------------------------------------
+          # 1. Install unzip
+          # -----------------------------------------------------------
+          Write-Host "==> Installing unzip..."
+          choco install unzip -y --no-progress --limit-output 2>&1 | Out-Null
+
+          # -----------------------------------------------------------
+          # 2. Define component downloads: (name, ver, suffix)
+          # -----------------------------------------------------------
+          $components = @(
+            @{name="cuda_nvcc";    ver=$ver_nvcc;    suffix=""},
+            @{name="cuda_cudart";  ver=$ver_cudart;  suffix=""},
+            @{name="cuda_nvrtc";   ver=$ver_nvrtc;   suffix=""},
+            @{name="libcublas";    ver=$ver_cublas;  suffix=""},
+            @{name="cuda_nvtx";    ver=$ver_nvtx;    suffix=""},
+            @{name="cuda_profiler_api"; ver=$ver_profapi; suffix=""},
+            @{name="cuda_cccl";    ver=$ver_cccl;    suffix=""}
+          )
+
+          # -----------------------------------------------------------
+          # 3. Download + extract EVERYTHING
+          # -----------------------------------------------------------
+          mkdir -p $cudaDir | Out-Null
+          Push-Location $cudaDir
+
+          $totalStart = Get-Date
+          foreach ($comp in $components) {
+            $name = $comp.name
+            $ver  = $comp.ver
+            $zip  = "${name}-windows-x86_64-${ver}-archive.zip"
+            $dir  = "${name}-windows-x86_64-${ver}-archive"
+            $url  = "${REDIST_BASE}/${name}/windows-x86_64/${zip}"
+
+            Write-Host "  [$name] $ver ($zip)"
+
+            # Download
+            $start = Get-Date
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing -TimeoutSec 600
+            } catch {
+              Write-Error "Download failed for $url : $_"
+              exit 1
+            }
+            $elapsed = [math]::Round(((Get-Date) - $start).TotalSeconds, 1)
+            $sizeMB  = [math]::Round((Get-Item $zip).Length / 1MB, 1)
+            Write-Host "    Downloaded ${sizeMB}MB in ${elapsed}s"
+
+            # Extract
+            $start = Get-Date
+            & unzip -q -o $zip 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "Extraction failed for $zip"
+              exit 1
+            }
+            Remove-Item $zip -Force
+            Write-Host "    Extracted in $([math]::Round(((Get-Date) - $start).TotalSeconds, 1))s"
+          }
+
+          $totalTime = [math]::Round(((Get-Date) - $totalStart).TotalMinutes, 1)
+          Write-Host "Download+extract: ${totalTime}min"
+          Write-Host ""
+
+          # -----------------------------------------------------------
+          # 4. xcopy extracted dirs into CUDA root
+          # -----------------------------------------------------------
+          Write-Host "==> Merging component trees into $cudaDir ..."
+          foreach ($comp in $components) {
+            $name = $comp.name
+            $ver  = $comp.ver
+            $dir  = "${name}-windows-x86_64-${ver}-archive"
+            if (Test-Path $dir) {
+              Write-Host "  Merging: $dir"
+              xcopy "$dir\*" "$cudaDir" /E /I /H /Y | Out-Null
+              Remove-Item -Recurse -Force $dir
+            }
+          }
+
+          # -----------------------------------------------------------
+          # 5. Set environment variables
+          # -----------------------------------------------------------
+          $cudaBin = Join-Path $cudaDir "bin"
+          $cudaLib = Join-Path $cudaDir "lib\x64"
+
+          echo "CUDA_PATH=$cudaDir"    | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          echo "CUDA_HOME=$cudaDir"    | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          echo "CUDA_PATH_V12_8=$cudaDir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          echo "$cudaBin"                | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+
+          $env:Path += ";$cudaBin"
+
+          $nvvmPath = Join-Path $cudaDir "nvvm\bin"
+          if (Test-Path $nvvmPath) {
+            echo "$nvvmPath" | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          }
+
+          Write-Host "CUDA_PATH=$cudaDir"
+          Write-Host ""
+
+          # -----------------------------------------------------------
+          # 6. Verify nvcc
+          # -----------------------------------------------------------
+          Write-Host "==> Verifying nvcc..."
+          $nvccPath = Get-Command nvcc.exe -ErrorAction SilentlyContinue
+          if (-not $nvccPath) { $nvccPath = Get-Item "$cudaBin\nvcc.exe" -ErrorAction SilentlyContinue }
+          if ($nvccPath) {
+            Write-Host "  Found: $($nvccPath.Source)"
+            & $nvccPath.Source --version
+          } else {
+            Write-Error "nvcc.exe not found!"
+            # Show what IS in the bin directory
+            if (Test-Path $cudaBin) {
+              Get-ChildItem $cudaBin | Select-Object Name, Length | Format-Table -AutoSize
+            }
+            exit 1
+          }
+
+      - name: Setup Visual Studio shell (amd64)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Install Ninja
+        uses: seanmiddleditch/gha-setup-ninja@v5
+
+      - name: Configure CMake
+        shell: pwsh
+        run: |
+          cmake -B build `
+            -G Ninja `
+            -DCMAKE_BUILD_TYPE=${{ inputs.build_type }} `
+            -DGGML_CUDA=ON `
+            -DGGML_NATIVE=ON `
+            -DGGML_CUDA_GRAPHS=ON `
+            -DGGML_CUDA_FA=ON `
+            -DGGML_CUDA_FA_ALL_QUANTS=ON `
+            -DCMAKE_CUDA_ARCHITECTURES="${{ inputs.cuda_arch }}" `
+            -DLLAMA_BUILD_TESTS=OFF `
+            -DLLAMA_BUILD_EXAMPLES=${{ inputs.build_examples && 'ON' || 'OFF' }} `
+            -DLLAMA_BUILD_SERVER=${{ inputs.build_server && 'ON' || 'OFF' }} `
+            -DLLAMA_BUILD_TOOLS=${{ inputs.build_tools && 'ON' || 'OFF' }} `
+            -DLLAMA_BUILD_COMMON=ON `
+            -DLLAMA_FATAL_WARNINGS=OFF `
+            -DCMAKE_CUDA_HOST_COMPILER=cl `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL `
+            -DCMAKE_INSTALL_PREFIX="${{ runner.temp }}/install"
+
+      - name: Build
+        shell: pwsh
+        run: |
+          cmake --build build --config ${{ inputs.build_type }} --parallel
+
+      - name: Install binaries
+        shell: pwsh
+        run: |
+          cmake --install build --config ${{ inputs.build_type }} --prefix "${{ runner.temp }}/install"
+
+      - name: Collect binaries
+        shell: pwsh
+        run: |
+          $installDir = "${{ runner.temp }}/install"
+          $distDir = "${{ runner.temp }}/dist"
+          New-Item -ItemType Directory -Force -Path $distDir | Out-Null
+
+          # Copy all binaries from install directory
+          Get-ChildItem -Path "$installDir/bin" -Filter "*.exe" -Recurse | ForEach-Object {
+            Write-Host "Copying: $($_.FullName)"
+            Copy-Item $_.FullName -Destination "$distDir/" -Force
+          }
+          Get-ChildItem -Path "$installDir/bin" -Filter "*.dll" -Recurse | ForEach-Object {
+            Write-Host "Copying: $($_.FullName)"
+            Copy-Item $_.FullName -Destination "$distDir/" -Force
+          }
+          Get-ChildItem -Path "$installDir/bin" -Filter "*.lib" -Recurse | ForEach-Object {
+            Write-Host "Copying: $($_.FullName)"
+            Copy-Item $_.FullName -Destination "$distDir/" -Force
+          }
+          Get-ChildItem -Path "$installDir/bin" -Filter "*.pdb" -Recurse | ForEach-Object {
+            Write-Host "Copying: $($_.FullName)"
+            Copy-Item $_.FullName -Destination "$distDir/" -Force
+          }
+
+          # Also look in build/bin for anything not installed
+          Get-ChildItem -Path "build/bin" -Filter "*.exe" | ForEach-Object {
+            $destFile = Join-Path $distDir $_.Name
+            if (-not (Test-Path $destFile)) {
+              Write-Host "Copying (from build/bin): $($_.FullName)"
+              Copy-Item $_.FullName -Destination $destFile -Force
+            }
+          }
+          Get-ChildItem -Path "build/bin" -Filter "*.dll" | ForEach-Object {
+            $destFile = Join-Path $distDir $_.Name
+            if (-not (Test-Path $destFile)) {
+              Write-Host "Copying (from build/bin): $($_.FullName)"
+              Copy-Item $_.FullName -Destination $destFile -Force
+            }
+          }
+
+          # Copy CUDA dependencies (cudart, cublas, etc.)
+          $cudaPath = "${{ env.CUDA_PATH }}"
+          if (Test-Path "$cudaPath/bin") {
+            Get-ChildItem -Path "$cudaPath/bin" -Filter "cudart*.dll" | ForEach-Object {
+              Copy-Item $_.FullName -Destination "$distDir/" -Force
+            }
+            Get-ChildItem -Path "$cudaPath/bin" -Filter "cublas*.dll" | ForEach-Object {
+              Copy-Item $_.FullName -Destination "$distDir/" -Force
+            }
+            Get-ChildItem -Path "$cudaPath/bin" -Filter "cufft*.dll" | ForEach-Object {
+              Copy-Item $_.FullName -Destination "$distDir/" -Force
+            }
+            Get-ChildItem -Path "$cudaPath/bin" -Filter "curand*.dll" | ForEach-Object {
+              Copy-Item $_.FullName -Destination "$distDir/" -Force
+            }
+            Get-ChildItem -Path "$cudaPath/bin" -Filter "cusparse*.dll" | ForEach-Object {
+              Copy-Item $_.FullName -Destination "$distDir/" -Force
+            }
+            Get-ChildItem -Path "$cudaPath/bin" -Filter "cusolver*.dll" | ForEach-Object {
+              Copy-Item $_.FullName -Destination "$distDir/" -Force
+            }
+            Get-ChildItem -Path "$cudaPath/bin" -Filter "nvrtc*.dll" | ForEach-Object {
+              Copy-Item $_.FullName -Destination "$distDir/" -Force
+            }
+          }
+
+          # Copy MSVC runtime DLLs
+          Get-ChildItem -Path "$distDir/" -Filter "*.dll" | ForEach-Object {
+            Write-Host "Included DLL: $($_.Name)"
+          }
+          Get-ChildItem -Path "$distDir/" -Filter "*.exe" | ForEach-Object {
+            Write-Host "Included EXE: $($_.Name)"
+          }
+
+      - name: Create zip archive
+        shell: pwsh
+        run: |
+          $distDir = "${{ runner.temp }}/dist"
+          $zipName = "llama.cpp-tq3-windows-x64-cuda${{ inputs.cuda_version }}-${{ inputs.build_type }}.zip"
+          Compress-Archive -Path "$distDir/*" -DestinationPath "${{ runner.temp }}/$zipName"
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: llama.cpp-tq3-windows-x64-cuda${{ inputs.cuda_version }}-${{ inputs.build_type }}
+          path: ${{ runner.temp }}/dist/
+          retention-days: 7
+
+      - name: Upload to Release
+        run: |
+          gh release create nightly "${{ runner.temp }}/llama.cpp-tq3-windows-x64-cuda${{ inputs.cuda_version }}-${{ inputs.build_type }}.zip" --title "Nightly Build" --prerelease --notes "Autobuild" --repo EricNie-Git/llama.cpp-tq3-release || true
+          gh release upload nightly "${{ runner.temp }}/llama.cpp-tq3-windows-x64-cuda${{ inputs.cuda_version }}-${{ inputs.build_type }}.zip" --clobber --repo EricNie-Git/llama.cpp-tq3-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
