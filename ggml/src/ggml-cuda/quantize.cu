@@ -1,6 +1,8 @@
 #include "quantize.cuh"
+#include "tq3-native.cuh"
 #include <cstdint>
 
+template <bool tq3_rotate>
 __launch_bounds__(CUDA_QUANTIZE_BLOCK_SIZE, 1)
 static __global__ void quantize_q8_1(
         const float * x_ptr, void * vy_ptr,
@@ -32,7 +34,21 @@ static __global__ void quantize_q8_1(
     const int64_t iqs = i_cont % QK8_1; // quant index
 
     ggml_cuda_pdl_sync();
-    const float xi = i0 < ne00 ? x[i03*s03 + i02*s02 + i01*s01 + i00] : 0.0f;
+    float xi = i0 < ne00 ? x[i03*s03 + i02*s02 + i01*s01 + i00] : 0.0f;
+
+    if constexpr (tq3_rotate) {
+        // Fused TQ3 activation rotation: each q8_1 block is exactly one 32-point
+        // Walsh-Hadamard group (ne0 % QK8_1 == 0), so the butterfly runs on the
+        // same warp lanes that reduce the block. Matches ggml_cuda_tq3_rotate_act.
+        float val = xi * ggml_cuda_tq3_sign(iqs);
+#pragma unroll
+        for (int step = 1; step < QK8_1; step <<= 1) {
+            const float other = __shfl_xor_sync(0xFFFFFFFF, val, step, 32);
+            val = (iqs & step) ? (other - val) : (other + val);
+        }
+        xi = val / sqrtf((float) QK8_1);
+    }
+
     float amax = fabsf(xi);
     float sum = xi;
 
@@ -84,7 +100,9 @@ __device__ __forceinline__ uint8_t compute_e8m0_scale(float amax) {
 #endif
 
 // Pick the ue4m3 sub-block scale for NVFP4 activation quantization.
-static __device__ __forceinline__ void ggml_cuda_nvfp4_act_scale(
+// [[maybe_unused]]: the only callers live in BLACKWELL_MMA_AVAILABLE blocks, so on
+// non-Blackwell device passes (e.g. sm_89 CI) this is unreferenced under -Werror all-warnings.
+[[maybe_unused]] static __device__ __forceinline__ void ggml_cuda_nvfp4_act_scale(
         const float * vals, const float amax, uint8_t & fp8_code, float & subblock_scale) {
     const int first_fp8_code = (int) ggml_cuda_fp32_to_ue4m3(amax / 6.0f);
 #if GGML_CUDA_NVFP4_ACT_CANDIDATES <= 1
@@ -591,8 +609,12 @@ void quantize_row_q8_1_cuda(
     const dim3 num_blocks(block_num_x, ne1, ne2*ne3);
     const dim3 block_size(CUDA_QUANTIZE_BLOCK_SIZE, 1, 1);
     const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(num_blocks, block_size, 0, stream);
-    ggml_cuda_kernel_launch(quantize_q8_1, launch_params, x, vy, ne00, s01, s02, s03, ne0, ne1, ne2_fastdiv);
-    GGML_UNUSED(type_src0);
+    if (type_src0 == GGML_TYPE_TQ3_4S) {
+        // TQ3_4S activations get the Walsh-Hadamard rotation fused into quantization.
+        ggml_cuda_kernel_launch(quantize_q8_1<true>, launch_params, x, vy, ne00, s01, s02, s03, ne0, ne1, ne2_fastdiv);
+    } else {
+        ggml_cuda_kernel_launch(quantize_q8_1<false>, launch_params, x, vy, ne00, s01, s02, s03, ne0, ne1, ne2_fastdiv);
+    }
 }
 
 void quantize_mmq_q8_1_cuda(
