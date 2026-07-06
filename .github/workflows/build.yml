@@ -314,24 +314,25 @@ jobs:
           Get-ChildItem -Path "$distDir/" -Filter "*.exe" | ForEach-Object {
             Write-Host "Included EXE: $($_.Name)"
           }
-
       - name: Create zip archive
         shell: pwsh
         run: |
           $distDir = "${{ runner.temp }}/dist"
-          $zipName = "llama.cpp-tq3-windows-x64-cuda${{ inputs.cuda_version }}-${{ inputs.build_type }}.zip"
+          $timestamp = Get-Date -Format "yyyyMMdd-HHmm"
+          $zipName = "llama.cpp-tq3-windows-x64-cuda${{ inputs.cuda_version }}-${{ inputs.build_type }}-${timestamp}.zip"
           Compress-Archive -Path "$distDir/*" -DestinationPath "${{ runner.temp }}/$zipName"
-
+          echo "ZIP_NAME=$zipName" | Out-File -FilePath $env:GITHUB_ENV -Append
+          
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
           name: llama.cpp-tq3-windows-x64-cuda${{ inputs.cuda_version }}-${{ inputs.build_type }}
           path: ${{ runner.temp }}/dist/
           retention-days: 7
-
+          
       - name: Upload to Release
         run: |
-          gh release create nightly "${{ runner.temp }}/llama.cpp-tq3-windows-x64-cuda${{ inputs.cuda_version }}-${{ inputs.build_type }}.zip" --title "Nightly Build" --prerelease --notes "Autobuild" --repo EricNie-Git/llama.cpp-tq3-release || true
-          gh release upload nightly "${{ runner.temp }}/llama.cpp-tq3-windows-x64-cuda${{ inputs.cuda_version }}-${{ inputs.build_type }}.zip" --clobber --repo EricNie-Git/llama.cpp-tq3-release
+          gh release create nightly "${{ runner.temp }}/${{ env.ZIP_NAME }}" --title "Nightly Build" --prerelease --notes "Autobuild" --repo EricNie-Git/llama.cpp-tq3-release || true
+          gh release upload nightly "${{ runner.temp }}/${{ env.ZIP_NAME }}" --clobber --repo EricNie-Git/llama.cpp-tq3-release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
