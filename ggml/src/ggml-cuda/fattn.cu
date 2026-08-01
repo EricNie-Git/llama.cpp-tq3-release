@@ -387,6 +387,10 @@ static bool ggml_cuda_fattn_kv_type_supported(ggml_type type) {
         case GGML_TYPE_Q4_0:
         case GGML_TYPE_Q8_0:
         case GGML_TYPE_BF16:
+        case GGML_TYPE_TQ3_0:
+        case GGML_TYPE_TURBO2_0:
+        case GGML_TYPE_TURBO3_0:
+        case GGML_TYPE_TURBO4_0:
             return true;
         default:
             return false;
@@ -499,6 +503,13 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
             break;
         default:
             break;
+    }
+
+    // Asymmetric tq3_0 V (K=q8_0/q4_0, V=tq3_0): native vector path for decode.
+    const bool asymm_tq3_v = (K->type == GGML_TYPE_Q8_0 || K->type == GGML_TYPE_Q4_0) &&
+                              V->type == GGML_TYPE_TQ3_0;
+    if (asymm_tq3_v && Q->ne[1] <= 4) {
+        return can_use_vector_kernel ? BEST_FATTN_KERNEL_VEC : BEST_FATTN_KERNEL_NONE;
     }
 
     // Asymmetric turbo V (K != V type): turbo types have no GPU to_fp16 conversion,
