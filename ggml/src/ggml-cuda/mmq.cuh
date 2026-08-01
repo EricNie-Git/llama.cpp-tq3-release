@@ -719,6 +719,13 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
     }
 }
 
+template <ggml_type type, int J, bool fallback>
+static __device__ __forceinline__ void ggml_cuda_mmq_load_tiles_tq3_4s(
+        const char * __restrict__ x, int * __restrict__ x_tile, const int kbx0, const int i_max, const int stride) {
+    constexpr int I = ggml_cuda_mmq_get_I(type, J, fallback);
+    load_tiles_tq3_4s<I, fallback>(x, x_tile, kbx0, i_max, stride);
+}
+
 template <int mmq_y, bool need_check>
 static __device__ __forceinline__ void load_tiles_tq3_4s_cached_nvfp4(const char * __restrict__ x,
                                                                       int * __restrict__ x_tile,
@@ -1101,6 +1108,12 @@ static constexpr __device__ ggml_cuda_mmq_util_funcs ggml_cuda_mmq_get_util_func
                     ggml_cuda_mmq_load_tiles_q8_0<type, J, fallback>,
                     ggml_cuda_mmq_vec_dot_q8_0_q8_1_dp4a<type, J, fallback>,
                     ggml_cuda_mmq_write_back_dp4a<type, J, fallback>);
+            case GGML_TYPE_TQ3_4S:
+                return ggml_cuda_mmq_util_funcs(
+                    VDR_Q8_0_Q8_1_MMQ,
+                    ggml_cuda_mmq_load_tiles_tq3_4s<type, J, fallback>,
+                    ggml_cuda_mmq_vec_dot_q8_0_q8_1_dp4a<type, J, fallback>,
+                    ggml_cuda_mmq_write_back_dp4a<type, J, fallback>);
 // ---------------------------------------------------------------------------------------------
             case GGML_TYPE_Q2_K:
                 return ggml_cuda_mmq_util_funcs(
@@ -1357,6 +1370,12 @@ static constexpr __device__ ggml_cuda_mmq_util_funcs ggml_cuda_mmq_get_util_func
                 -1,
                 ggml_cuda_mmq_load_tiles_nvfp4<type, J, fallback>,
                 ggml_cuda_mmq_vec_dot_q8_0_16_q8_1_mma<type, J, fallback>,
+                ggml_cuda_mmq_write_back_mma<type, J, fallback>);
+        case GGML_TYPE_TQ3_4S:
+            return ggml_cuda_mmq_util_funcs(
+                -1,
+                ggml_cuda_mmq_load_tiles_tq3_4s<type, J, fallback>,
+                ggml_cuda_mmq_vec_dot_q8_0_q8_1_mma<type, J, fallback, MMQ_Q8_1_DS_LAYOUT_D4>,
                 ggml_cuda_mmq_write_back_mma<type, J, fallback>);
         default:
             return ggml_cuda_mmq_util_funcs(1, nullptr, nullptr, nullptr);
