@@ -43,18 +43,23 @@ on:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.run_id }}
   cancel-in-progress: true
-
+  
+env:
+  UPSTREAM_REPO: turbo-tan/llama.cpp-tq3
+  UPSTREAM_BRANCH: main
+  
 jobs:
   build-windows-cuda:
     runs-on: windows-2022
     strategy:
       fail-fast: false
-
+    
     steps:
-      - name: Checkout local repository
+      - name: Checkout upstream
         uses: actions/checkout@v4
         with:
-          ref: main
+          repository: ${{ env.UPSTREAM_REPO }}
+          ref: ${{ env.UPSTREAM_BRANCH }}
           submodules: recursive
           fetch-depth: 1
 
