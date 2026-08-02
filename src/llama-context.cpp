@@ -124,8 +124,9 @@ llama_context::llama_context(
     cparams.no_perf                 = params.no_perf;
     cparams.warmup                  = false;
 
-    cparams.embeddings_layer_inp.resize(hparams.n_layer(), false);
-    embd_layer_inp.resize(hparams.n_layer());
+    // +1: id n_layer() taps the output of the last layer ("input" of the head)
+    cparams.embeddings_layer_inp.resize(hparams.n_layer() + 1, false);
+    embd_layer_inp.resize(hparams.n_layer() + 1);
 
     cparams.ctx_type     = params.ctx_type;
     cparams.pooling_type = params.pooling_type;
@@ -1294,7 +1295,7 @@ void llama_context::set_embeddings_nextn(bool value, bool masked) {
 void llama_context::set_embeddings_layer_inp(uint32_t lid, bool enable) {
     LLAMA_LOG_DEBUG("%s: lid = %d, enable = %d\n", __func__, lid, enable);
 
-    GGML_ASSERT(lid < model.hparams.n_layer());
+    GGML_ASSERT(lid <= model.hparams.n_layer());
 
     cparams.embeddings_layer_inp[lid] = enable;
 
@@ -1994,7 +1995,8 @@ int llama_context::decode(const llama_batch & batch_inp) {
     const auto & hparams = model.hparams;
 
     const int64_t n_vocab = vocab.n_tokens();
-    const int64_t n_embd  = hparams.n_embd_inp();
+    const bool    mtp_embd = cparams.ctx_type == LLAMA_CONTEXT_TYPE_MTP && batch_inp.embd;
+    const int64_t n_embd  = mtp_embd ? hparams.n_embd_out() : hparams.n_embd_inp();
 
     // when computing embeddings, all tokens are output
     const bool output_all   = cparams.embeddings;
@@ -2557,9 +2559,9 @@ void llama_context::extract_layer_inputs(const llm_graph_result * res, size_t to
 }
 
 void llama_context::output_reorder() {
-    const uint64_t n_vocab    = model.vocab.n_tokens();
-    const uint64_t n_embd     = model.hparams.n_embd;
-    const uint64_t n_embd_out = model.hparams.n_embd_out();
+    const uint64_t n_vocab     = model.vocab.n_tokens();
+    const uint64_t n_embd      = model.hparams.n_embd;
+    const uint64_t n_embd_out  = model.hparams.n_embd_out();
 
     for (size_t s = 0; s < output_swaps.size(); ++s) {
         const uint64_t i0 = output_swaps[s].i0;
@@ -2634,6 +2636,7 @@ uint32_t llama_context::graph_max_nodes(uint32_t n_tokens) const {
         model.arch == LLM_ARCH_QWEN35 ||
         model.arch == LLM_ARCH_QWEN35MOE ||
         model.arch == LLM_ARCH_DEEPSEEK4 ||
+        (model.arch == LLM_ARCH_DFLASH && model.hparams.dsv4_hc_mult > 0) ||
         model.arch == LLM_ARCH_NANBEIGE ||
         model.arch == LLM_ARCH_MINIMAX_M3) {
         return std::max<uint32_t>(n_tokens * 40, 32u * model.n_tensors());
