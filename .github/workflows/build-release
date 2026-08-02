@@ -44,10 +44,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.run_id }}
   cancel-in-progress: true
 
-env:
-  UPSTREAM_REPO: turbo-tan/llama.cpp-tq3
-  UPSTREAM_BRANCH: main
-
 jobs:
   build-windows-cuda:
     runs-on: windows-2022
@@ -55,11 +51,10 @@ jobs:
       fail-fast: false
 
     steps:
-      - name: Checkout upstream
+      - name: Checkout local repository
         uses: actions/checkout@v4
         with:
-          repository: ${{ env.UPSTREAM_REPO }}
-          ref: ${{ env.UPSTREAM_BRANCH }}
+          ref: main
           submodules: recursive
           fetch-depth: 1
 
@@ -324,19 +319,21 @@ jobs:
         shell: pwsh
         run: |
           $distDir = "${{ runner.temp }}/dist"
-          $zipName = "llama.cpp-tq3-windows-x64-cuda${{ inputs.cuda_version }}-${{ inputs.build_type }}.zip"
+          $timestamp = Get-Date -Format "yyyyMMdd-HHmm"
+          $zipName = "llama.cpp-tq3-windows-x64-cuda${{ inputs.cuda_version }}-${{ inputs.build_type }}-${timestamp}.zip"
           Compress-Archive -Path "$distDir/*" -DestinationPath "${{ runner.temp }}/$zipName"
+          echo "ZIP_NAME=$zipName" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
-          name: llama.cpp-tq3-windows-x64-cuda${{ inputs.cuda_version }}-${{ inputs.build_type }}
+          name: llama.cpp-tq3-windows-x64-cuda${{ inputs.cuda_version }}-${{ inputs.build_type }}-${{ github.run_id }}
           path: ${{ runner.temp }}/dist/
           retention-days: 7
 
       - name: Upload to Release
         run: |
-          gh release create nightly "${{ runner.temp }}/llama.cpp-tq3-windows-x64-cuda${{ inputs.cuda_version }}-${{ inputs.build_type }}.zip" --title "Nightly Build" --prerelease --notes "Autobuild" --repo EricNie-Git/llama.cpp-tq3-autobuild || true
-          gh release upload nightly "${{ runner.temp }}/llama.cpp-tq3-windows-x64-cuda${{ inputs.cuda_version }}-${{ inputs.build_type }}.zip" --clobber --repo EricNie-Git/llama.cpp-tq3-autobuild
+          gh release create nightly "${{ runner.temp }}/${{ env.ZIP_NAME }}" --title "Nightly Build" --prerelease --notes "Autobuild" --repo EricNie-Git/llama.cpp-tq3-release || true
+          gh release upload nightly "${{ runner.temp }}/${{ env.ZIP_NAME }}" --clobber --repo EricNie-Git/llama.cpp-tq3-release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
