@@ -1,8 +1,8 @@
 export const API_MODELS = {
 	LIST: '/v1/models',
 	LOAD: '/models/load',
-	SSE: '/models/sse',
-	UNLOAD: '/models/unload'
+	UNLOAD: '/models/unload',
+	SSE: '/models/sse'
 };
 
 // chat completion routes, the control route drives realtime inference (e.g. end reasoning)
@@ -17,8 +17,8 @@ export const API_SLOTS = {
 };
 
 export const API_TOOLS = {
-	EXECUTE: '/tools',
-	LIST: '/tools'
+	LIST: '/tools',
+	EXECUTE: '/tools'
 };
 
 // resumable stream routes, the conv::model identity travels as the conv_id query param

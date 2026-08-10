@@ -1,5 +1,5 @@
-import { SETTINGS_KEYS } from '$lib/constants/settings-keys';
 import { describe, expect, it } from 'vitest';
+import { SETTINGS_KEYS } from '$lib/constants/settings-keys';
 
 /**
  * Default-value policy for the `MCP_SERVERS` setting.

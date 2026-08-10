@@ -57,6 +57,9 @@
 // While BW spans CC 1000, 1100 & 1200, we are integrating Tensor Core instructions available to 1200 family, see
 // https://docs.nvidia.com/cutlass/media/docs/cpp/blackwell_functionality.html#blackwell-sm120-gemms
 #define GGML_CUDA_CC_BLACKWELL       1200
+#if !defined(GGML_USE_HIP) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= GGML_CUDA_CC_BLACKWELL
+#define BLACKWELL_MMA_AVAILABLE
+#endif
 #define GGML_CUDA_CC_DGX_SPARK       1210
 #define GGML_CUDA_CC_RUBIN           1300
 #define GGML_CUDA_CC_OFFSET_AMD      0x1000000
@@ -627,8 +630,7 @@ template <typename T> struct block_reduce_policy<block_reduce_method::MAX, T> {
 };
 
 template <block_reduce_method reduce_method_t, const unsigned int block_size_template = 0, typename T>
-static __device__ T block_reduce(T val, [[maybe_unused]] T * shared_vals) {
-    // for multi-warp reductions, callers must not reuse shared_vals until all reads from this invocation have completed
+static __device__ T block_reduce(T val, T * shared_vals) {
     val                           = block_reduce_policy<reduce_method_t, T>::reduce(val);
     const unsigned int block_size = block_size_template == 0 ? blockDim.x : block_size_template;
     if (block_size > WARP_SIZE) {
@@ -1132,6 +1134,62 @@ struct ggml_cuda_type_traits<GGML_TYPE_IQ3_S> {
     static constexpr int qi = QI3_S;
 };
 
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_TQ3_0> {
+    static constexpr int qk = QK_TQ3_0;
+    static constexpr int qr = 2;  // 2 values per dequant call (like q4_0)
+    static constexpr int qi = 16;  // qi/vdr=4: 4 threads per block
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_TQ3_1S> {
+    static constexpr int qk = QK_TQ3_0;
+    static constexpr int qr = 2;
+    static constexpr int qi = 16;
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_TQ3_4S> {
+    static constexpr int qk = QK_TQ3_0;
+    static constexpr int qr = 2;
+    static constexpr int qi = 16;
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_TQ3_4SE> {
+    static constexpr int qk = QK_TQ3_0;
+    static constexpr int qr = 2;
+    static constexpr int qi = 16;
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_TQ3_4SV> {
+    static constexpr int qk = QK_TQ3_0;
+    static constexpr int qr = 2;
+    static constexpr int qi = 16;
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_TQ3_1S_AP1> {
+    static constexpr int qk = QK_TQ3_1S_AP1;
+    static constexpr int qr = 2;
+    static constexpr int qi = 16;
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q4_0_TQ> {
+    static constexpr int qk = QK_Q4_0_TQ_V0;
+    static constexpr int qr = 2;
+    static constexpr int qi = 16;
+};
+
+template<>
+struct ggml_cuda_type_traits<GGML_TYPE_Q4_1_TQ> {
+    static constexpr int qk = QK_Q4_0_TQ_V1;
+    static constexpr int qr = 2;
+    static constexpr int qi = 16;
+};
+
 //////////////////////
 
 struct ggml_cuda_device_info {
@@ -1422,6 +1480,16 @@ struct ggml_backend_cuda_context {
 
     int curr_stream_no = 0;
 
+    struct tq3_4s_nvfp4_cache_entry {
+        void * data = nullptr;
+        size_t size = 0;
+        size_t src_size = 0;
+        const void * src_data = nullptr;
+    };
+
+    std::mutex tq3_4s_nvfp4_cache_mutex;
+    std::unordered_map<const void *, tq3_4s_nvfp4_cache_entry> tq3_4s_nvfp4_cache;
+
 #ifdef USE_CUDA_GRAPH
     // Map from first_node_ptr to cuda_graph - allows multiple graphs per context
     // when the computation is split across CPU/GPU (e.g., with --n-cpu-moe)
@@ -1627,7 +1695,11 @@ static bool ggml_cuda_kernel_can_use_pdl(const void * kernel) {
     }
 
     cudaFuncAttributes attr = {};
-    CUDA_CHECK(cudaFuncGetAttributes(&attr, kernel));
+    cudaError_t err = cudaFuncGetAttributes(&attr, kernel);
+    if (err != cudaSuccess) {
+        // Cannot determine PDL support (e.g. Blackwell + CUDA 13.0). Fall back to standard launch.
+        return false;
+    }
 
     // PDL device-side primitives are emitted only for PTX versions >= 90.
     // We have to guard on a loaded kernel's PTX version so a kernel forward-JIT'ed
@@ -1666,4 +1738,3 @@ static __inline__ void ggml_cuda_kernel_launch(Kernel kernel, const ggml_cuda_ke
     kernel<<<launch_params.block_nums, launch_params.block_dims, launch_params.shmem, launch_params.stream>>>(std::forward<Args>(args)... );
     CUDA_CHECK(cudaGetLastError());
 }
-

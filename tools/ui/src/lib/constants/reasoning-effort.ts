@@ -7,18 +7,18 @@ import type { ReasoningEffortLevel } from '$lib/types';
  */
 export const REASONING_EFFORT_LABELS: Record<string, string> = {
 	[ReasoningEffort.DEFAULT]: 'Default',
-	[ReasoningEffort.HIGH]: 'High',
+	[ReasoningEffort.OFF]: 'Off',
 	[ReasoningEffort.LOW]: 'Low',
-	[ReasoningEffort.MAX]: 'Max',
 	[ReasoningEffort.MEDIUM]: 'Medium',
-	[ReasoningEffort.OFF]: 'Off'
+	[ReasoningEffort.HIGH]: 'High',
+	[ReasoningEffort.MAX]: 'Max'
 };
 
 export const REASONING_EFFORT_LEVELS: ReasoningEffortLevel[] = [
-	{ label: 'Default', value: ReasoningEffort.DEFAULT },
-	{ label: 'Off', value: ReasoningEffort.OFF },
-	{ label: 'Low', value: ReasoningEffort.LOW },
-	{ label: 'Medium', value: ReasoningEffort.MEDIUM },
-	{ label: 'High', value: ReasoningEffort.HIGH },
-	{ hasInfo: true, label: 'Max', value: ReasoningEffort.MAX }
+	{ value: ReasoningEffort.DEFAULT, label: 'Default' },
+	{ value: ReasoningEffort.OFF, label: 'Off' },
+	{ value: ReasoningEffort.LOW, label: 'Low' },
+	{ value: ReasoningEffort.MEDIUM, label: 'Medium' },
+	{ value: ReasoningEffort.HIGH, label: 'High' },
+	{ value: ReasoningEffort.MAX, label: 'Max', hasInfo: true }
 ];

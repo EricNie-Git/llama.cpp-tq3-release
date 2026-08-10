@@ -106,6 +106,10 @@ LLAMA_API float * llama_get_embeddings_nextn(struct llama_context * ctx);
 
 // LLAMA_API float * llama_get_embeddings_ith(struct llama_context * ctx, int32_t i);
 LLAMA_API float * llama_get_embeddings_nextn_ith(struct llama_context * ctx, int32_t i);
+LLAMA_API float * llama_get_embeddings_nextn_ith_no_sync(struct llama_context * ctx, int32_t i);
+LLAMA_API struct ggml_tensor * llama_context_get_t_h_pre_norm(struct llama_context * ctx);
+LLAMA_API struct ggml_tensor * llama_context_get_t_mtp_out(struct llama_context * ctx);
+LLAMA_API void llama_set_mtp(struct llama_context * ctx_target, struct llama_context * ctx_mtp);
 
 // Set whether the context outputs the input embeddings of a specific layer
 LLAMA_API void llama_set_embeddings_layer_inp(struct llama_context * ctx, uint32_t lid, bool value);
@@ -116,6 +120,15 @@ LLAMA_API float * llama_get_embeddings_layer_inp(struct llama_context * ctx, uin
 
 LLAMA_API llama_context * llama_get_ctx_other(struct llama_context * ctx);
 
+LLAMA_API llama_token llama_get_sampled_token_ith_no_sync(struct llama_context * ctx, int32_t i);
+LLAMA_API float * llama_get_sampled_probs_ith_no_sync(struct llama_context * ctx, int32_t i);
+LLAMA_API uint32_t llama_get_sampled_probs_count_ith_no_sync(struct llama_context * ctx, int32_t i);
+LLAMA_API float * llama_get_sampled_logits_ith_no_sync(struct llama_context * ctx, int32_t i);
+LLAMA_API uint32_t llama_get_sampled_logits_count_ith_no_sync(struct llama_context * ctx, int32_t i);
+LLAMA_API llama_token * llama_get_sampled_candidates_ith_no_sync(struct llama_context * ctx, int32_t i);
+LLAMA_API uint32_t llama_get_sampled_candidates_count_ith_no_sync(struct llama_context * ctx, int32_t i);
+LLAMA_API float * llama_get_logits_ith_no_sync(struct llama_context * ctx, int32_t i);
+
 //
 // model/context data extraction
 //
@@ -124,9 +137,3 @@ LLAMA_API llama_context * llama_get_ctx_other(struct llama_context * ctx);
 LLAMA_API const int32_t * llama_model_target_layer_ids  (const struct llama_model * model);
 // returns the number of extracted layers from target model
 LLAMA_API uint32_t        llama_model_target_layer_ids_n(const struct llama_model * model);
-
-// retrieves the whole token embedding matrix in F32 format (n_embd * n_vocab)
-// returns total number of elements or 0 on error
-// if out is nullptr, returns the number of tokens without writing to out
-// caller must allocate enough memory for out before calling
-LLAMA_API uint32_t llama_model_get_tok_embd(const struct llama_model * model, float * out);

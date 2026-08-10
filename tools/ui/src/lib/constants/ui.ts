@@ -1,13 +1,10 @@
-import { ROUTES } from './routes';
-import { Package, Search, Settings, SquarePen } from '@lucide/svelte';
+import { Search, Settings, SquarePen } from '@lucide/svelte';
 import McpLogo from '$lib/components/app/mcp/McpLogo.svelte';
 import type { Component } from 'svelte';
+import { ROUTES } from './routes';
 
 export const FORK_TREE_DEPTH_PADDING = 8;
 export const SYSTEM_MESSAGE_PLACEHOLDER = 'System message';
-
-/** Icon used for the model selector and the `/model` slash command. */
-export const MODEL_SELECTOR_ICON = Package;
 
 export const ICON_STRIP_TRANSITION_DURATION = 150;
 export const ICON_STRIP_TRANSITION_DELAY_MULTIPLIER = 50;
@@ -26,18 +23,18 @@ export interface DesktopIconStripItem {
 }
 
 export const SIDEBAR_ACTIONS_ITEMS: DesktopIconStripItem[] = [
-	{ icon: SquarePen, keys: ['shift', 'cmd', 'o'], route: ROUTES.NEW_CHAT, tooltip: 'New chat' },
-	{ icon: Search, keys: ['cmd', 'k'], tooltip: 'Search' },
+	{ icon: SquarePen, tooltip: 'New chat', route: ROUTES.NEW_CHAT, keys: ['shift', 'cmd', 'o'] },
+	{ icon: Search, tooltip: 'Search', keys: ['cmd', 'k'] },
 	{
-		activeRouteId: '/mcp-servers',
 		icon: McpLogo,
+		tooltip: 'MCP Servers',
 		route: ROUTES.MCP_SERVERS,
-		tooltip: 'MCP Servers'
+		activeRouteId: '/mcp-servers'
 	},
 	{
-		activeUrlIncludes: '#/settings',
 		icon: Settings,
+		tooltip: 'Settings',
 		route: `${ROUTES.SETTINGS}/general`,
-		tooltip: 'Settings'
+		activeUrlIncludes: '#/settings'
 	}
 ];

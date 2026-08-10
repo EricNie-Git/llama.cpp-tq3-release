@@ -1,5 +1,5 @@
-import { SVG_MAX_BYTES, SVG_SANITIZE_CONFIG, SVG_TAG_PREFIX } from '$lib/constants';
 import DOMPurify from 'dompurify';
+import { SVG_MAX_BYTES, SVG_SANITIZE_CONFIG, SVG_TAG_PREFIX } from '$lib/constants';
 
 /**
  * Sanitizes a raw svg string for safe inline rendering.

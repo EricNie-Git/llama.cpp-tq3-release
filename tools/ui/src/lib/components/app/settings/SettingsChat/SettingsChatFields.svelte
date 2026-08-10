@@ -1,6 +1,6 @@
 <script lang="ts">
-	import { FlaskConical, RotateCcw } from '@lucide/svelte';
-	import { SettingsChatParameterSourceIndicator } from '$lib/components/app/settings';
+	import { ICON_CLASS_DEFAULT } from '$lib/constants/css-classes';
+	import { RotateCcw, FlaskConical } from '@lucide/svelte';
 	import { Checkbox } from '$lib/components/ui/checkbox';
 	import { Input } from '$lib/components/ui/input';
 	import Label from '$lib/components/ui/label/label.svelte';
@@ -8,12 +8,12 @@
 	import * as Select from '$lib/components/ui/select';
 	import { Textarea } from '$lib/components/ui/textarea';
 	import { SETTING_CONFIG_INFO, SETTINGS_KEYS } from '$lib/constants';
-	import { ICON_CLASS_DEFAULT } from '$lib/constants/css-classes';
 	import { SettingsFieldType } from '$lib/enums/settings.enums';
-	import { modelsStore, propsCacheVersion, selectedModelName } from '$lib/stores/models.svelte';
-	import { serverStore } from '$lib/stores/server.svelte';
 	import { settingsStore } from '$lib/stores/settings.svelte';
+	import { serverStore } from '$lib/stores/server.svelte';
+	import { modelsStore, selectedModelName, propsCacheVersion } from '$lib/stores/models.svelte';
 	import { normalizeFloatingPoint } from '$lib/utils/precision';
+	import { SettingsChatParameterSourceIndicator } from '$lib/components/app/settings';
 	import type { Component } from 'svelte';
 
 	interface Props {
@@ -40,7 +40,6 @@
 				>;
 			}
 		}
-
 		return (serverStore.defaultParams ?? {}) as Record<string, unknown>;
 	});
 </script>
@@ -53,7 +52,6 @@
 				{@const serverDefault = currentModelParams[field.key]}
 				{@const isCustomRealTime = (() => {
 					if (serverDefault == null) return false;
-
 					if (currentValue === '') return false;
 
 					const numericInput = parseFloat(currentValue);
@@ -85,18 +83,12 @@
 					<Input
 						id={field.key}
 						type={field.isPositiveInteger ? 'number' : 'text'}
-						{...field.isPositiveInteger
-							? {
-									min: String(field.min ?? 1),
-									step: '1',
-									...(field.max != null ? { max: String(field.max) } : {})
-								}
-							: {}}
+						{...field.isPositiveInteger ? { min: '1', step: '1' } : {}}
 						value={currentValue}
 						oninput={(e) => onConfigChange(field.key, e.currentTarget.value)}
 						placeholder={currentModelParams[field.key] != null
 							? `Default: ${normalizeFloatingPoint(currentModelParams[field.key])}`
-							: (field.placeholder ?? '')}
+							: ''}
 						class="w-full {isCustomRealTime ? 'pr-8' : ''}"
 					/>
 					{#if isCustomRealTime}
@@ -167,9 +159,7 @@
 				{@const serverDefault = currentModelParams[field.key]}
 				{@const isCustomRealTime = (() => {
 					if (serverDefault == null) return false;
-
 					if (currentValue === '' || currentValue === undefined) return false;
-
 					return currentValue !== serverDefault;
 				})()}
 

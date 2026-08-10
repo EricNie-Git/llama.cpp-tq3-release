@@ -56,6 +56,9 @@ const char * llama_ftype_name(llama_ftype ftype) {
         case LLAMA_FTYPE_MOSTLY_Q5_K_S:    name = LLAMA_FTYPE_PREFIX "Q5_K - Small"; break;
         case LLAMA_FTYPE_MOSTLY_Q5_K_M:    name = LLAMA_FTYPE_PREFIX "Q5_K - Medium"; break;
         case LLAMA_FTYPE_MOSTLY_Q6_K:      name = LLAMA_FTYPE_PREFIX "Q6_K"; break;
+        case LLAMA_FTYPE_MOSTLY_TQ3_0:    return "TQ3_0 - 3.50 bpw turbo";
+        case LLAMA_FTYPE_MOSTLY_TQ3_1S:   return "TQ3_1S - 4.00 bpw turbo two-scale";
+        case LLAMA_FTYPE_MOSTLY_TQ3_4S:   return "TQ3_4S - 4.00 bpw turbo four-scale";
         case LLAMA_FTYPE_MOSTLY_TQ1_0:     name = LLAMA_FTYPE_PREFIX "TQ1_0 - 1.69 bpw ternary"; break;
         case LLAMA_FTYPE_MOSTLY_TQ2_0:     name = LLAMA_FTYPE_PREFIX "TQ2_0 - 2.06 bpw ternary"; break;
         case LLAMA_FTYPE_MOSTLY_IQ2_XXS:   name = LLAMA_FTYPE_PREFIX "IQ2_XXS - 2.0625 bpw"; break;
@@ -419,6 +422,8 @@ namespace GGUFMeta {
         return found;
     }
 
+    template bool llama_model_loader::get_key<bool>       (const std::string & key, bool & result,        bool required);
+
     template<typename T>
     bool llama_model_loader::get_key(enum llm_kv kid, T & result, bool required) {
         return get_key(llm_kv(kid), result, required);
@@ -747,6 +752,9 @@ llama_model_loader::llama_model_loader(
             case GGML_TYPE_Q6_K:    ftype = LLAMA_FTYPE_MOSTLY_Q6_K;    break;
             case GGML_TYPE_TQ1_0:   ftype = LLAMA_FTYPE_MOSTLY_TQ1_0;   break;
             case GGML_TYPE_TQ2_0:   ftype = LLAMA_FTYPE_MOSTLY_TQ2_0;   break;
+            case GGML_TYPE_TQ3_0:   ftype = LLAMA_FTYPE_MOSTLY_TQ3_0;   break;
+            case GGML_TYPE_TQ3_1S:  ftype = LLAMA_FTYPE_MOSTLY_TQ3_1S;  break;
+            case GGML_TYPE_TQ3_4S:  ftype = LLAMA_FTYPE_MOSTLY_TQ3_4S;  break;
             case GGML_TYPE_IQ2_XXS: ftype = LLAMA_FTYPE_MOSTLY_IQ2_XXS; break;
             case GGML_TYPE_IQ2_XS:  ftype = LLAMA_FTYPE_MOSTLY_IQ2_XS;  break;
             case GGML_TYPE_IQ2_S:   ftype = LLAMA_FTYPE_MOSTLY_IQ2_S;   break;
@@ -857,11 +865,7 @@ struct ggml_tensor * llama_model_loader::require_tensor_meta(const std::string &
     return tensor;
 }
 
-const struct ggml_tensor * llama_model_loader::check_tensor_dims(
-        const std::string & name,
-        const std::vector<int64_t> & ne,
-        bool required,
-        bool allow_reshape) const {
+const struct ggml_tensor * llama_model_loader::check_tensor_dims(const std::string & name, const std::vector<int64_t> & ne, bool required) const {
     const struct ggml_tensor * cur = get_tensor_meta(name.c_str());
 
     if (cur == NULL) {
@@ -871,33 +875,21 @@ const struct ggml_tensor * llama_model_loader::check_tensor_dims(
         throw std::runtime_error(format("%s: tensor '%s' not found", __func__, name.c_str()));
     }
 
-    bool is_ok = true;
-
-    if (allow_reshape) {
-        // check total number of elements only
-        const int64_t ncur = ggml_nelements(cur);
-        int64_t nexp = 1;
-        for (size_t i = 0; i < ne.size(); ++i) {
-            nexp *= ne[i];
-        }
-        if (ncur != nexp) {
-            is_ok = false;
-        }
-    } else {
+    {
+        bool is_ok = true;
         for (size_t i = 0; i < GGML_MAX_DIMS; ++i) {
             if ((i < ne.size() && ne[i] != cur->ne[i]) || (i >= ne.size() && cur->ne[i] != 1)) {
                 is_ok = false;
                 break;
             }
         }
-    }
-
-    if (!is_ok) {
-        throw std::runtime_error(
-                format("%s: tensor '%s' has wrong shape; expected %s, got %s",
-                    __func__, name.c_str(),
-                    llama_format_tensor_shape(ne).c_str(),
-                    llama_format_tensor_shape(cur).c_str()));
+        if (!is_ok) {
+            throw std::runtime_error(
+                    format("%s: tensor '%s' has wrong shape; expected %s, got %s",
+                        __func__, name.c_str(),
+                        llama_format_tensor_shape(ne).c_str(),
+                        llama_format_tensor_shape(cur).c_str()));
+        }
     }
 
     return cur;
@@ -937,11 +929,10 @@ static bool weight_buft_supported(const llama_hparams & hparams, ggml_tensor * w
             } break;
         case GGML_OP_MUL_MAT_ID:
             {
-                // Used for either MoE expert routing or embedded adapter routing
-                const int n_ids_used = hparams.router_layer >= 0 ? 1 : hparams.n_expert_used;
-                GGML_ASSERT(n_ids_used > 0);
-                ggml_tensor * b = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, w->ne[0], n_ids_used, 512);
-                ggml_tensor * ids = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, n_ids_used, 512);
+                const int n_expert_used = hparams.n_expert_used;
+                GGML_ASSERT(n_expert_used > 0);
+                ggml_tensor * b = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, w->ne[0], n_expert_used, 512);
+                ggml_tensor * ids = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, n_expert_used, 512);
                 op_tensor = ggml_mul_mat_id(ctx, w, b, ids);
             } break;
         case GGML_OP_ADD:
@@ -1124,14 +1115,15 @@ struct ggml_tensor * llama_model_loader::create_tensor(
             return nullptr;
         }
 
-        // tensors with "bias" suffix are always used with GGML_OP_ADD or GGML_OP_ADD_ID;
-        // embedded-adapter ".lora_a"/".lora_b" tensors are always used with GGML_OP_MUL_MAT_ID
+        // tensors with "bias" suffix are always used with GGML_OP_ADD or GGML_OP_ADD_ID
         ggml_op op;
-        if (tn.suffix != nullptr && strcmp(tn.suffix, "bias") == 0) {
-            op = info.op == GGML_OP_MUL_MAT_ID ? GGML_OP_ADD_ID : GGML_OP_ADD;
-        } else if (hparams.router_layer >= 0 && tn.suffix != nullptr &&
-                (strcmp(tn.suffix, "lora_a") == 0 || strcmp(tn.suffix, "lora_b") == 0)) {
-            op = GGML_OP_MUL_MAT_ID;
+        bool bias = tn.suffix != nullptr && strcmp(tn.suffix, "bias") == 0;
+        if (bias) {
+            if (info.op == GGML_OP_MUL_MAT_ID) {
+                op = GGML_OP_ADD_ID;
+            } else {
+                op = GGML_OP_ADD;
+            }
         } else {
             op = info.op;
         }
@@ -1249,13 +1241,7 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         for (size_t dim = 0; dim < GGML_MAX_DIMS; dim++) {
             t_meta.ne[dim] = dim < ne.size() ? ne.begin()[dim] : 1;
             GGML_ASSERT(t_meta.ne[dim] >= 1);
-            if (dim == 0) {
-                t_meta.nb[dim] = ggml_type_size(type);
-            } else if (dim == 1) {
-                t_meta.nb[dim] = ggml_row_size(type, t_meta.ne[dim-1]);
-            } else {
-                t_meta.nb[dim] = t_meta.nb[dim-1]*t_meta.ne[dim-1];
-            }
+            t_meta.nb[dim] = dim == 0 ? ggml_type_size(type) : t_meta.ne[dim-1]*t_meta.nb[dim-1];
             GGML_ASSERT(t_meta.nb[dim] >= 1);
         }
         ggml_set_name(&t_meta, tn.str().c_str());
@@ -1268,33 +1254,11 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         return ret;
     }
 
-    LLAMA_LOG_DEBUG("%s: loading tensor %s\n", __func__, tn.str().c_str());
-    const struct ggml_tensor * cur = check_tensor_dims(tn.str(), ne, !(flags & TENSOR_NOT_REQUIRED), flags & TENSOR_ALLOW_RESHAPE);
-    if (cur == NULL) {
-        return NULL;
-    }
-
-    ggml_tensor t_meta = *cur;
-    if (flags & TENSOR_ALLOW_RESHAPE) {
-        for (size_t dim = 0; dim < GGML_MAX_DIMS; dim++) {
-            t_meta.ne[dim] = dim < ne.size() ? ne.begin()[dim] : 1;
-            if (dim == 0) {
-                t_meta.nb[dim] = ggml_type_size(t_meta.type);
-            } else if (dim == 1) {
-                t_meta.nb[dim] = ggml_row_size(t_meta.type, t_meta.ne[dim-1]);
-            } else {
-                t_meta.nb[dim] = t_meta.ne[dim-1]*t_meta.nb[dim-1];
-            }
-        }
-    }
-
-    GGML_ASSERT(ggml_nbytes(&t_meta) == ggml_nbytes(cur));
-
-    ggml_backend_buffer_type_t buft = buft_for_tensor(&t_meta);
+    ggml_tensor * t_meta = get_tensor_meta(tn.str().c_str());
+    ggml_backend_buffer_type_t buft = buft_for_tensor(t_meta);
     if (buft == nullptr) {
-        return nullptr;
+        return nullptr; // return type is ggml_tensor *
     }
-
     ggml_context * ctx = ctx_for_buft(buft);
 
     // if duplicated, check if the original tensor was allocated in the same buffer type context and avoid creating a new one
@@ -1305,16 +1269,51 @@ struct ggml_tensor * llama_model_loader::create_tensor(
         }
     }
 
+    LLAMA_LOG_DEBUG("%s: loading tensor %s\n", __func__, tn.str().c_str());
+    const struct ggml_tensor * cur = check_tensor_dims(tn.str(), ne, !(flags & TENSOR_NOT_REQUIRED));
+
+    if (cur == NULL) {
+        return NULL;
+    }
+
     const bool duplicated = flags & TENSOR_DUPLICATED;
 
-    struct ggml_tensor * tensor = ggml_dup_tensor(ctx, &t_meta);
-    ggml_set_name(tensor, ggml_get_name(&t_meta));
+    struct ggml_tensor * tensor = ggml_dup_tensor(ctx, cur);
+    ggml_set_name(tensor, ggml_get_name(cur));
 
     if (duplicated) {
-        size_data += ggml_nbytes(&t_meta);
+        size_data += ggml_nbytes(cur);
     } else {
         n_created++;
     }
+
+    return tensor;
+}
+
+struct ggml_tensor * llama_model_loader::create_tensor_as_view(struct ggml_context * ctx, struct ggml_tensor * base, const std::string & name, const std::initializer_list<int64_t> & ne, size_t offset, bool required) {
+    const struct ggml_tensor * cur = check_tensor_dims(name, ne, required);
+
+    if (cur == NULL) {
+        return NULL;
+    }
+
+    if (cur->type != base->type) {
+        throw std::runtime_error(format("%s: tensor '%s' has wrong type; expected %s, got %s", __func__, name.c_str(), ggml_type_name(base->type), ggml_type_name(cur->type)));
+    }
+
+    std::array<int64_t, GGML_MAX_DIMS> dims;
+    for (size_t i = 0; i < GGML_MAX_DIMS; ++i) {
+        dims[i] = i < ne.size() ? ne.begin()[i] : 1;
+    }
+
+    struct ggml_tensor * tensor = ggml_view_4d(ctx, base,
+                                    dims[0], dims[1], dims[2], dims[3],
+                                    cur->nb[1], cur->nb[2], cur->nb[3],
+                                    offset);
+
+    ggml_set_name(tensor, name.c_str());
+
+    n_created++;
 
     return tensor;
 }

@@ -1,5 +1,5 @@
-import type { OpenAIToolDefinition } from './mcp';
 import type { ToolSource } from '$lib/enums';
+import type { OpenAIToolDefinition } from './mcp';
 
 export interface ToolEntry {
 	source: ToolSource;

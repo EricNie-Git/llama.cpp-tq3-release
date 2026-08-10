@@ -1,11 +1,11 @@
 import {
-	LEADING_SLASHES_REGEX,
 	TEMPLATE_EXPRESSION_REGEX,
 	URI_SCHEME_SEPARATOR,
 	URI_TEMPLATE_OPERATORS,
 	URI_TEMPLATE_SEPARATORS,
 	VARIABLE_EXPLODE_MODIFIER_REGEX,
-	VARIABLE_PREFIX_MODIFIER_REGEX
+	VARIABLE_PREFIX_MODIFIER_REGEX,
+	LEADING_SLASHES_REGEX
 } from '../constants';
 
 /**
@@ -25,7 +25,6 @@ import {
  */
 export function normalizeResourceUri(uri: string): string {
 	const schemeEnd = uri.indexOf(URI_SCHEME_SEPARATOR);
-
 	if (schemeEnd === -1) return uri;
 
 	const scheme = uri.substring(0, schemeEnd);
@@ -66,7 +65,6 @@ export function extractTemplateVariables(template: string): UriTemplateVariable[
 	const seen = new Set<string>();
 
 	let match;
-
 	TEMPLATE_EXPRESSION_REGEX.lastIndex = 0;
 
 	while ((match = TEMPLATE_EXPRESSION_REGEX.exec(template)) !== null) {
@@ -119,6 +117,7 @@ export function expandTemplate(template: string, values: Record<string, string>)
 						.replace(VARIABLE_PREFIX_MODIFIER_REGEX, '')
 						.trim()
 				);
+
 			const expandedParts = varNames
 				.map((name: string) => values[name] ?? '')
 				.filter((v: string) => v !== '');

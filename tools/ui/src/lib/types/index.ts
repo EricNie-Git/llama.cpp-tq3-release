@@ -53,9 +53,7 @@ export type {
 	LiveProcessingStats,
 	LiveGenerationStats,
 	AttachmentDisplayItemsOptions,
-	FileProcessingResult,
-	FileMentionEntry,
-	ChatFormCommand
+	FileProcessingResult
 } from './chat.d';
 
 // Database types

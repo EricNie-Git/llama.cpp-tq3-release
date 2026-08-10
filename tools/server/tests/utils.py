@@ -29,7 +29,7 @@ from re import RegexFlag
 import wget
 
 
-DEFAULT_HTTP_TIMEOUT = 60
+DEFAULT_HTTP_TIMEOUT = int(os.environ.get("LLAMA_SERVER_START_TIMEOUT", "60"))
 
 # per-request timeout, a hung server fails the test instead of stalling the CI for hours
 DEFAULT_REQUEST_TIMEOUT = 600
@@ -115,7 +115,6 @@ class ServerProcess:
     backend_sampling: bool = False
     gcp_compat: bool = False
     server_tools: str | None = None
-    server_tools_runtime: str | None = None
     mcp_servers_config: str | None = None
     mcp_servers_json: str | None = None
     cors_origins: str | None = None
@@ -133,10 +132,7 @@ class ServerProcess:
         self.external_server = "DEBUG_EXTERNAL" in os.environ
 
     def start(self, timeout_seconds: int = DEFAULT_HTTP_TIMEOUT) -> None:
-        env = {
-            **os.environ,
-            "LLAMA_SERVER_DEBUG_FAKE_TIMING": "1",
-        }
+        env = {**os.environ}
         if "LLAMA_CACHE" not in os.environ:
             env["LLAMA_CACHE"] = "tmp"
         if self.external_server:
@@ -271,8 +267,6 @@ class ServerProcess:
             server_args.append("--ui-mcp-proxy")
         if self.server_tools:
             server_args.extend(["--tools", self.server_tools])
-        if self.server_tools_runtime:
-            server_args.extend(["--tools-runtime", self.server_tools_runtime])
         if self.mcp_servers_config:
             server_args.extend(["--mcp-servers-config", self.mcp_servers_config])
         if self.mcp_servers_json:
@@ -309,7 +303,6 @@ class ServerProcess:
 
         # wait for server to start
         start_time = time.time()
-        last_print_time = start_time
         while time.time() - start_time < timeout_seconds:
             try:
                 response = self.make_request("GET", "/health", headers={
@@ -324,10 +317,8 @@ class ServerProcess:
             if self.process.poll() is not None:
                 raise RuntimeError(f"Server process died with return code {self.process.returncode}")
 
-            if time.time() - last_print_time >= 1.0:
-                print(f"Waiting for server to start...")
-                last_print_time = time.time()
-            time.sleep(0.01)
+            print(f"Waiting for server to start...")
+            time.sleep(0.5)
         raise TimeoutError(f"Server did not start within {timeout_seconds} seconds")
 
     def stop(self) -> None:

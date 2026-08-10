@@ -4,35 +4,35 @@
  */
 
 import {
-	Eye as VisionIcon,
 	File as FileIcon,
 	FileText as FileTextIcon,
 	Image as ImageIcon,
+	Eye as VisionIcon,
 	Mic as AudioIcon,
 	Video as VideoIcon
 } from '@lucide/svelte';
 import { FileTypeCategory, ModelModality } from '$lib/enums';
 
 export const FILE_TYPE_ICONS = {
-	[FileTypeCategory.AUDIO]: AudioIcon,
 	[FileTypeCategory.IMAGE]: ImageIcon,
-	[FileTypeCategory.PDF]: FileIcon,
+	[FileTypeCategory.AUDIO]: AudioIcon,
+	[FileTypeCategory.VIDEO]: VideoIcon,
 	[FileTypeCategory.TEXT]: FileTextIcon,
-	[FileTypeCategory.VIDEO]: VideoIcon
+	[FileTypeCategory.PDF]: FileIcon
 } as const;
 
 export const DEFAULT_FILE_ICON = FileIcon;
 
 export const MODALITY_ICONS = {
+	[ModelModality.VISION]: VisionIcon,
 	[ModelModality.AUDIO]: AudioIcon,
-	[ModelModality.VIDEO]: VideoIcon,
-	[ModelModality.VISION]: VisionIcon
+	[ModelModality.VIDEO]: VideoIcon
 } as const;
 
 export const MODALITY_LABELS = {
+	[ModelModality.VISION]: 'Vision',
 	[ModelModality.AUDIO]: 'Audio',
-	[ModelModality.VIDEO]: 'Video',
-	[ModelModality.VISION]: 'Vision'
+	[ModelModality.VIDEO]: 'Video'
 } as const;
 
 // Shared SVG icon strings for copy and preview buttons

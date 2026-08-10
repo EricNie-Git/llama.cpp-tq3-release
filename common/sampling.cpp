@@ -6,6 +6,7 @@
 #include "reasoning-budget.h"
 
 #include "ggml.h"
+#include "../src/llama-ext.h"
 
 #include <algorithm>
 #include <cctype>
@@ -128,9 +129,9 @@ struct common_sampler {
     }
 
     void set_logits(struct llama_context * ctx, int idx) {
-        const float *       sampled_probs  = llama_get_sampled_probs_ith     (ctx, idx);
-        const float *       sampled_logits = llama_get_sampled_logits_ith    (ctx, idx);
-        const llama_token * sampled_ids    = llama_get_sampled_candidates_ith(ctx, idx);
+        const float *       sampled_probs  = llama_get_sampled_probs_ith_no_sync     (ctx, idx);
+        const float *       sampled_logits = llama_get_sampled_logits_ith_no_sync    (ctx, idx);
+        const llama_token * sampled_ids    = llama_get_sampled_candidates_ith_no_sync(ctx, idx);
 
         const llama_model * model = llama_get_model(ctx);
         const llama_vocab * vocab = llama_model_get_vocab(model);
@@ -138,19 +139,19 @@ struct common_sampler {
         const int n_vocab = llama_vocab_n_tokens(vocab);
 
         if (sampled_probs) {
-            const uint32_t sampled_probs_count = llama_get_sampled_probs_count_ith(ctx, idx);
+            const uint32_t sampled_probs_count = llama_get_sampled_probs_count_ith_no_sync(ctx, idx);
             cur.resize(sampled_probs_count);
             for (uint32_t i = 0; i < sampled_probs_count; ++i) {
                 cur[i] = llama_token_data{sampled_ids[i], sampled_logits[i], sampled_probs[i]};
             }
         } else if (sampled_logits) {
-            const uint32_t sampled_logits_count = llama_get_sampled_logits_count_ith(ctx, idx);
+            const uint32_t sampled_logits_count = llama_get_sampled_logits_count_ith_no_sync(ctx, idx);
             cur.resize(sampled_logits_count);
             for (uint32_t i = 0; i < sampled_logits_count; i++) {
                 cur[i] = llama_token_data{sampled_ids[i], sampled_logits[i], 0.0f};
             }
         } else {
-            const auto * logits = llama_get_logits_ith(ctx, idx);
+            const auto * logits = llama_get_logits_ith_no_sync(ctx, idx);
             GGML_ASSERT(logits != nullptr);
             cur.resize(n_vocab);
             for (llama_token token_id = 0; token_id < n_vocab; token_id++) {
@@ -184,21 +185,9 @@ std::string common_params_sampling::print() const {
     return std::string(result);
 }
 
-struct common_sampler * common_sampler_init(
-        const struct llama_model * model,
-        struct common_params_sampling & params) {
-    if (!std::isfinite(params.penalty_repeat) ||
-        params.penalty_repeat <= 0.0f ||
-        !std::isfinite(1.0f/params.penalty_repeat)) {
-        throw std::invalid_argument("penalty_repeat must be finite and greater than 0");
-    }
-    if (!std::isfinite(params.penalty_freq)) {
-        throw std::invalid_argument("penalty_freq must be finite");
-    }
-    if (!std::isfinite(params.penalty_present)) {
-        throw std::invalid_argument("penalty_present must be finite");
-    }
+struct common_sampler * common_sampler_init(const struct llama_model * model, struct common_params_sampling & params) {
     const llama_vocab * vocab = llama_model_get_vocab(model);
+
     llama_sampler_chain_params lparams = llama_sampler_chain_default_params();
 
     lparams.no_perf = params.no_perf;
@@ -350,7 +339,7 @@ struct common_sampler * common_sampler_init(
                         for (const auto & str : params.dry_sequence_breakers) {
                             c_breakers.push_back(str.c_str());
                         }
-                        samplers.push_back(llama_sampler_init_dry(vocab, params.dry_multiplier, params.dry_base, params.dry_allowed_length, params.dry_penalty_last_n, c_breakers.data(), c_breakers.size()));
+                        samplers.push_back(llama_sampler_init_dry(vocab, llama_model_n_ctx_train(model), params.dry_multiplier, params.dry_base, params.dry_allowed_length, params.dry_penalty_last_n, c_breakers.data(), c_breakers.size()));
                     }
                     break;
                 case COMMON_SAMPLER_TYPE_TOP_K:
@@ -378,7 +367,7 @@ struct common_sampler * common_sampler_init(
                     samplers.push_back(llama_sampler_init_infill(vocab));
                     break;
                 case COMMON_SAMPLER_TYPE_PENALTIES:
-                    samplers.push_back(llama_sampler_init_penalties(llama_vocab_n_tokens(vocab), params.penalty_last_n, params.penalty_repeat, params.penalty_freq, params.penalty_present));
+                    samplers.push_back(llama_sampler_init_penalties(params.penalty_last_n, params.penalty_repeat, params.penalty_freq, params.penalty_present));
                     break;
                 case COMMON_SAMPLER_TYPE_ADAPTIVE_P:
                     // the `adaptive-p` sampler is like `dist` and `mirostat` in that it selects
@@ -518,26 +507,6 @@ struct common_sampler * common_sampler_clone(common_sampler * gsmpl) {
     };
 }
 
-void common_sampler_copy(const common_sampler * src, common_sampler * dst) {
-    if (!src || !dst || src == dst) {
-        return;
-    }
-
-    GGML_ASSERT((src->grmr == nullptr) == (dst->grmr == nullptr));
-    GGML_ASSERT((src->rbudget == nullptr) == (dst->rbudget == nullptr));
-
-    llama_sampler_copy(src->grmr,    dst->grmr);
-    llama_sampler_copy(src->rbudget, dst->rbudget);
-    llama_sampler_copy(src->chain,   dst->chain);
-
-    dst->params     = src->params;
-    dst->prev       = src->prev;
-    dst->cur        = src->cur;
-    dst->cur_p      = src->cur_p;
-    dst->cur_p.data = src->cur_p.data ? dst->cur.data() : nullptr; // re-point to dst's buffer
-    dst->t_total_us = src->t_total_us;
-}
-
 void common_perf_print(const struct llama_context * ctx, const struct common_sampler * gsmpl) {
     // TODO: measure grammar performance
 
@@ -609,7 +578,7 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
     // Check if a backend sampler has already sampled a token in which case we
     // return that token id directly.
     {
-        id = llama_get_sampled_token_ith(ctx, idx);
+        id = llama_get_sampled_token_ith_no_sync(ctx, idx);
 
         if (id != LLAMA_TOKEN_NULL) {
             LOG_DBG("%s: Backend sampler selected token: '%d'. Will not run any CPU samplers\n", __func__, id);

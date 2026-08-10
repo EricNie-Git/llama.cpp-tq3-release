@@ -39,18 +39,19 @@ using json = nlohmann::ordered_json;
 
 constexpr int HTTP_POLLING_SECONDS = 1;
 
-static common_speculative_output_limits server_output_limits(const common_params & params) {
+static uint32_t server_n_outputs_max(const common_params & params) {
+    const uint32_t n_batch  = params.n_batch;
+
     if (params.embedding ||
             (params.pooling_type != LLAMA_POOLING_TYPE_UNSPECIFIED && params.pooling_type != LLAMA_POOLING_TYPE_NONE)) {
-        return { params.n_batch, 1 };
+        return n_batch;
     }
 
-    auto result = common_speculative_get_output_limits(
-            params.n_batch, params.n_parallel, common_speculative_n_max(&params.speculative));
+    const uint32_t n_outputs_per_seq = 1 + common_speculative_n_max(&params.speculative);
 
-    result.total   = std::max<int32_t>(1, result.total);
-    result.per_seq = std::max<int32_t>(1, result.per_seq);
-    return result;
+    const uint64_t n_outputs = (uint64_t) params.n_parallel * n_outputs_per_seq;
+
+    return std::max<uint32_t>(1, std::min<uint64_t>(n_batch, n_outputs));
 }
 
 // state diagram: https://github.com/ggml-org/llama.cpp/pull/9283
@@ -211,7 +212,6 @@ struct server_slot {
     llama_tokens spec_prompt;
     std::vector<int32_t> spec_i_batch;
     common_prompt_checkpoint spec_ckpt;
-    bool spec_is_replay = false;
 
     // TODO: move members that belong to the task (such as `generated_text`, `has_new_line`) to task_results_state
     //       see https://github.com/ggml-org/llama.cpp/pull/18283#issuecomment-3710175837
@@ -331,8 +331,6 @@ struct server_slot {
 
     void reset() {
         SLT_DBG(*this, "%s", "\n");
-
-        spec_is_replay = false;
 
         n_prompt_tokens_cache = 0;
 
@@ -844,11 +842,6 @@ struct server_metrics {
     uint64_t n_decode_total     = 0;
     uint64_t n_busy_slots_total = 0;
 
-    uint64_t n_draft_tokens_total      = 0;
-    uint64_t n_draft_accepted_total    = 0;
-    uint64_t n_draft_verif_steps_total = 0;
-    std::vector<uint64_t> n_accepted_per_pos_total;
-
     void init() {
         t_start = ggml_time_us();
     }
@@ -867,17 +860,6 @@ struct server_metrics {
         n_tokens_predicted         += slot.n_decoded;
         t_tokens_generation        += slot.t_token_generation;
         t_tokens_generation_total  += slot.t_token_generation;
-
-        n_draft_tokens_total      += slot.n_draft_total;
-        n_draft_accepted_total    += slot.n_draft_accepted;
-        n_draft_verif_steps_total += slot.n_draft_verif_steps;
-
-        if (n_accepted_per_pos_total.size() < slot.n_accepted_per_pos.size()) {
-            n_accepted_per_pos_total.resize(slot.n_accepted_per_pos.size(), 0);
-        }
-        for (size_t i = 0; i < slot.n_accepted_per_pos.size(); i++) {
-            n_accepted_per_pos_total[i] += slot.n_accepted_per_pos[i];
-        }
     }
 
     void on_decoded(const std::vector<server_slot> & slots) {
@@ -1062,9 +1044,7 @@ private:
         const bool is_resume = sleeping;
 
         params_base = params;
-        const auto output_limits = server_output_limits(params_base);
-        params_base.n_outputs_max = output_limits.total;
-        params_base.n_outputs_max_per_seq = output_limits.per_seq;
+        params_base.n_outputs_max = server_n_outputs_max(params_base);
 
         const bool has_mmproj = !params.mmproj.path.empty();
         const bool has_draft = params.speculative.has_dft();
@@ -1833,13 +1813,18 @@ private:
 
             const bool need_pre_sample_logits = task.params.sampling.n_probs > 0 && !task.params.post_sampling_probs;
 
-            bool use_backend_sampling = task.params.sampling.backend_sampling;
+            bool backend_sampling = true;
+
+            backend_sampling &= task.params.sampling.backend_sampling;
+
+            // TODO: speculative decoding requires multiple samples per batch - not supported yet
+            backend_sampling &= !(slot.can_speculate());
 
             // TODO: getting pre sampling logits is not yet supported with backend sampling
-            use_backend_sampling &= !need_pre_sample_logits;
+            backend_sampling &= !need_pre_sample_logits;
 
             // TODO: tmp until backend sampling is fully implemented
-            if (use_backend_sampling) {
+            if (backend_sampling) {
                 llama_set_sampler(ctx_tgt, slot.id, common_sampler_get(slot.smpl.get()));
             } else {
                 llama_set_sampler(ctx_tgt, slot.id, nullptr);
@@ -2563,11 +2548,6 @@ private:
 
                     res->n_decode_total          = metrics.n_decode_total;
                     res->n_busy_slots_total      = metrics.n_busy_slots_total;
-
-                    res->n_draft_tokens_total      = metrics.n_draft_tokens_total;
-                    res->n_draft_accepted_total    = metrics.n_draft_accepted_total;
-                    res->n_draft_verif_steps_total = metrics.n_draft_verif_steps_total;
-                    res->n_accepted_per_pos_total  = metrics.n_accepted_per_pos_total;
 
                     if (task.metrics_reset_bucket) {
                         metrics.reset_bucket();
@@ -3861,8 +3841,7 @@ private:
 
         // speculative decoding - main model sample and accept
         iterate(slots, [&](server_slot & slot) {
-            if (slot.state != SLOT_STATE_GENERATING || !slot.can_speculate() ||
-                    slot.spec_draft.empty() || slot.spec_i_batch.empty()) {
+            if (slot.state != SLOT_STATE_GENERATING || !slot.can_speculate() || slot.spec_draft.empty()) {
                 return;
             }
 
@@ -3873,6 +3852,7 @@ private:
 
             // verify and try to accept the draft
             {
+                // save the sampler sampler state in case we need to restore it
                 common_sampler_ptr smpl_save(common_sampler_clone(slot.smpl.get()));
 
                 GGML_ASSERT(slot.spec_i_batch.size() == n_draft + 1);
@@ -3895,7 +3875,6 @@ private:
                         }
 
                         // partial acceptance is not supported by the context -> truncate the draft and restore the state
-                        slot.spec_is_replay = true;
                         slot.spec_draft = std::move(accepted);
 
                         const auto & ckpt = slot.spec_ckpt;
@@ -3911,7 +3890,7 @@ private:
                         slot.mem.seq_rm(slot.id, ckpt.pos_max + 1, -1);
 
                         slot.prompt.tokens.keep_first(ckpt.n_tokens);
-                        common_sampler_copy(smpl_save.get(), slot.smpl.get());
+                        slot.smpl = std::move(smpl_save);
 
                         return;
                     }
@@ -3930,22 +3909,16 @@ private:
 
             const auto ids = std::move(slot.spec_draft);
 
-            size_t n_accepted = ids.size() - 1;
-            if (slot.spec_is_replay && n_accepted > 0) {
-                n_accepted--;
-            }
-            slot.spec_is_replay = false;
-
             slot.t_token_generation = std::max<int64_t>(1, t_now - slot.t_start_generation) / 1e3;
 
             // update how many tokens out of those tested were accepted
-            slot.n_draft_accepted += n_accepted;
+            slot.n_draft_accepted += ids.size() - 1;
             slot.n_draft_verif_steps += 1;
 
             if (slot.n_accepted_per_pos.empty()) {
                 slot.n_accepted_per_pos.resize(common_speculative_n_max(&params_base.speculative), 0);
             }
-            for (size_t i = 0; i < n_accepted && i < slot.n_accepted_per_pos.size(); ++i) {
+            for (size_t i = 0; i < ids.size() - 1 && i < slot.n_accepted_per_pos.size(); ++i) {
                 slot.n_accepted_per_pos[i]++;
             }
 
@@ -3981,7 +3954,7 @@ private:
 
             slot.print_timings_tg();
 
-            SLT_DBG(slot, "accepted %d/%d draft tokens, new n_tokens = %d\n", (int) n_accepted, (int) n_draft, slot.prompt.n_tokens());
+            SLT_DBG(slot, "accepted %d/%d draft tokens, new n_tokens = %d\n", (int) ids.size() - 1, (int) n_draft, slot.prompt.n_tokens());
         });
     }
 
@@ -4164,6 +4137,7 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
             task.params = server_schema::eval_llama_cmpl_schema(
                     ctx_server.vocab,
                     params,
+                    meta->slot_n_ctx,
                     meta->logit_bias_eog,
                     data);
 
@@ -4457,18 +4431,6 @@ void server_routes::init_routes() {
                     {"name",  "n_tokens_max"},
                     {"help",  "Largest observed n_tokens."},
                     {"value",  res_task->n_tokens_max}
-            }, {
-                    {"name",  "spec_decode_num_draft_tokens_total"},
-                    {"help",  "Total draft tokens generated"},
-                    {"value",  res_task->n_draft_tokens_total}
-            }, {
-                    {"name",  "spec_decode_num_accepted_tokens_total"},
-                    {"help",  "Total draft tokens accepted by the target model"},
-                    {"value",  res_task->n_draft_accepted_total}
-            }, {
-                    {"name",  "spec_decode_num_drafts_total"},
-                    {"help",  "Total speculative decoding verification steps"},
-                    {"value",  res_task->n_draft_verif_steps_total}
             }}},
             {"gauge", {{
                     {"name",  "prompt_tokens_seconds"},
@@ -4507,17 +4469,6 @@ void server_routes::init_routes() {
                 prometheus << "# HELP llamacpp:" << name << " " << help  << "\n"
                             << "# TYPE llamacpp:" << name << " " << type  << "\n"
                             << "llamacpp:"        << name << " " << value << "\n";
-            }
-        }
-
-        // labeled counter: one time series per draft position
-        if (!res_task->n_accepted_per_pos_total.empty()) {
-            prometheus << "# HELP llamacpp:spec_decode_num_accepted_tokens_per_pos_total"
-                          " Accepted tokens per draft position\n"
-                       << "# TYPE llamacpp:spec_decode_num_accepted_tokens_per_pos_total counter\n";
-            for (size_t i = 0; i < res_task->n_accepted_per_pos_total.size(); i++) {
-                prometheus << "llamacpp:spec_decode_num_accepted_tokens_per_pos_total{position=\""
-                           << i << "\"} " << res_task->n_accepted_per_pos_total[i] << "\n";
             }
         }
 

@@ -1,6 +1,6 @@
 import { goto } from '$app/navigation';
-import { ROUTES } from '$lib/constants/routes';
 import { KeyboardKey } from '$lib/enums';
+import { ROUTES } from '$lib/constants/routes';
 
 interface KeyboardShortcutsCallbacks {
 	activateSearchMode?: () => void;

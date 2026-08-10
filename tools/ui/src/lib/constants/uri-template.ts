@@ -10,38 +10,38 @@ export const TEMPLATE_EXPRESSION_REGEX = /\{([+#./;?&]?)([^}]+)\}/g;
 
 /** RFC 6570 URI template operators */
 export const URI_TEMPLATE_OPERATORS = {
-	/** Form-style query continuation */
-	FORM_CONTINUATION: '&',
-	/** Form-style query */
-	FORM_QUERY: '?',
+	/** Simple string expansion (default) */
+	SIMPLE: '',
+	/** Reserved expansion */
+	RESERVED: '+',
 	/** Fragment expansion */
 	FRAGMENT: '#',
+	/** Path segment expansion */
+	PATH_SEGMENT: '/',
 	/** Label expansion */
 	LABEL: '.',
 	/** Path-style parameters */
 	PATH_PARAM: ';',
-	/** Path segment expansion */
-	PATH_SEGMENT: '/',
-	/** Reserved expansion */
-	RESERVED: '+',
-	/** Simple string expansion (default) */
-	SIMPLE: ''
+	/** Form-style query */
+	FORM_QUERY: '?',
+	/** Form-style query continuation */
+	FORM_CONTINUATION: '&'
 } as const;
 
 /** URI template separators used in expansion */
 export const URI_TEMPLATE_SEPARATORS = {
 	/** Comma separator for list expansion */
 	COMMA: ',',
+	/** Slash separator for path segments */
+	SLASH: '/',
 	/** Period separator for label expansion */
 	PERIOD: '.',
-	/** Ampersand prefix for query continuation */
-	QUERY_CONTINUATION: '&',
-	/** Question mark prefix for query string */
-	QUERY_PREFIX: '?',
 	/** Semicolon separator for path parameters */
 	SEMICOLON: ';',
-	/** Slash separator for path segments */
-	SLASH: '/'
+	/** Question mark prefix for query string */
+	QUERY_PREFIX: '?',
+	/** Ampersand prefix for query continuation */
+	QUERY_CONTINUATION: '&'
 } as const;
 
 /** Maximum number of leading slashes to strip during URI normalization */

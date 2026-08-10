@@ -6,26 +6,24 @@
 	// The scroll-to-bottom auto-scroll logic mirrors what was here
 	// before extraction.
 
-	import { parseExecShellCommandMeta } from './parsers/exec-shell-command';
-	import ToolCallBlock from './ToolCallBlock.svelte';
-	import { AlertTriangle, Check, Loader2, XCircle } from '@lucide/svelte';
+	import { Check, Loader2, XCircle, AlertTriangle } from '@lucide/svelte';
 	import { CollapsibleTerminalBlock } from '$lib/components/app';
 	import { SETTINGS_KEYS } from '$lib/constants';
-	import { TOOL_RUNTIME_SCROLL_AT_BOTTOM_THRESHOLD_PX } from '$lib/constants/auto-scroll';
 	import { config } from '$lib/stores/settings.svelte';
-	import { toolsStore } from '$lib/stores/tools.svelte';
-	import type { DatabaseMessageExtra } from '$lib/types';
+	import { TOOL_RUNTIME_SCROLL_AT_BOTTOM_THRESHOLD_PX } from '$lib/constants/auto-scroll';
 	import {
-		abbreviateHome,
-		type AgenticSection,
-		type ExecShellExitStatus,
 		highlightCode,
 		isExitCodeSummaryLine,
 		parseExecShellCommandError,
 		parseExecShellCommandExitStatus,
 		parseToolResultWithImages,
+		type AgenticSection,
+		type ExecShellExitStatus,
 		type ToolResultLine
 	} from '$lib/utils';
+	import { parseExecShellCommandMeta } from './parsers/exec-shell-command';
+	import type { DatabaseMessageExtra } from '$lib/types';
+	import ToolCallBlock from './ToolCallBlock.svelte';
 
 	interface Props {
 		section: AgenticSection;
@@ -39,7 +37,7 @@
 		onToggle?: () => void;
 	}
 
-	let { attachments, isExecuting = false, isStreaming, onToggle, open, section }: Props = $props();
+	let { section, open, isStreaming, isExecuting = false, attachments, onToggle }: Props = $props();
 
 	// `isLive` covers all in-flight phases: pre-chunk spinner and
 	// streaming itself. Frozen output (tool done while agent continues)
@@ -77,14 +75,6 @@
 		execShellMeta ? highlightCode(execShellMeta.command, 'bash') : ''
 	);
 
-	// The working directory the command ran with, persisted per call on the
-	// tool result message (it travels via the x-tool-cwd header, not the tool
-	// args). Reading it from the section keeps it accurate even if the
-	// conversation cwd changes later.
-	const cwd = $derived(section.toolCwd);
-	const home = $derived(toolsStore.serverHome);
-	const wdDisplay = $derived(abbreviateHome(cwd ?? '', home));
-
 	const exitBadgeClass = $derived(
 		execShellExitStatus?.timedOut
 			? 'exit-badge warning'
@@ -108,7 +98,6 @@
 
 	function isAtBottom(): boolean {
 		if (!scrollEl) return false;
-
 		return (
 			scrollEl.scrollHeight - scrollEl.clientHeight - scrollEl.scrollTop <=
 			SCROLL_BOTTOM_THRESHOLD_PX
@@ -117,7 +106,6 @@
 
 	function scrollToBottomOnFrame() {
 		if (pendingFrame !== null || !scrollEl || userScrolledUp) return;
-
 		pendingFrame = requestAnimationFrame(() => {
 			pendingFrame = null;
 
@@ -130,23 +118,18 @@
 
 	function handleScrollEvent() {
 		if (!scrollEl) return;
-
 		const isScrollingUp = scrollEl.scrollTop < lastScrollTop;
-
 		if (isScrollingUp && !isAtBottom()) {
 			userScrolledUp = true;
 		} else if (isAtBottom()) {
 			userScrolledUp = false;
 		}
-
 		lastScrollTop = scrollEl.scrollTop;
 	}
 
 	$effect(() => {
 		void section.toolResult;
-
 		if (!scrollEl || !autoScroll) return;
-
 		scrollToBottomOnFrame();
 	});
 
@@ -156,11 +139,10 @@
 		if (!scrollEl || !autoScroll) return;
 
 		const observer = new MutationObserver(() => scrollToBottomOnFrame());
-
 		observer.observe(scrollEl, {
-			characterData: true,
 			childList: true,
-			subtree: true
+			subtree: true,
+			characterData: true
 		});
 
 		return () => observer.disconnect();
@@ -177,11 +159,6 @@
 </script>
 
 {#snippet execShellTitle()}
-	{#if cwd}
-		<span class="exec-wd" title={cwd}>{wdDisplay}</span>
-		<span class="exec-prompt">$</span>
-	{/if}
-
 	{#if highlightedCommandHtml}
 		<span class="font-mono">{@html highlightedCommandHtml}</span>
 	{:else}
@@ -255,23 +232,6 @@
 </ToolCallBlock>
 
 <style>
-	:root {
-		--exec-wd-margin: 0.4rem;
-	}
-
-	.exec-wd {
-		font-family: var(--font-mono);
-		color: var(--muted-foreground);
-		margin-right: var(--exec-wd-margin);
-	}
-
-	.exec-prompt {
-		font-family: var(--font-mono);
-		color: var(--muted-foreground);
-		opacity: 0.55;
-		margin-right: var(--exec-wd-margin);
-	}
-
 	.terminal-output {
 		overscroll-behavior: contain;
 	}

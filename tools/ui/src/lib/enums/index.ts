@@ -24,9 +24,7 @@ export {
 	MessageRole,
 	MessageType,
 	PdfViewMode,
-	ReasoningFormat,
-	ChatFormCommandAction,
-	FileMentionEntryType
+	ReasoningFormat
 } from './chat.enums';
 
 export { SessionRecordType } from './conversation-import.enums';
@@ -74,12 +72,6 @@ export { ColorMode, HtmlInputType, McpPromptVariant, TooltipSide, UrlProtocol } 
 
 export { KeyboardKey } from './keyboard.enums';
 
-export {
-	BuiltInTool,
-	GlobSearchType,
-	ToolSource,
-	ToolPermissionDecision,
-	ToolResponseField
-} from './tools.enums';
+export { BuiltInTool, ToolSource, ToolPermissionDecision, ToolResponseField } from './tools.enums';
 
 export { SplashOrientation } from './splash.enums';

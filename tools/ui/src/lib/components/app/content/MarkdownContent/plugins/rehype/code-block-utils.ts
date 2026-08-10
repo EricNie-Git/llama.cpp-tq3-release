@@ -3,21 +3,21 @@
  * Contains common HAST element creation functions to avoid code duplication.
  */
 
+import type { Element, ElementContent } from 'hast';
 import {
-	CODE_BLOCK_ACTIONS_CLASS,
 	CODE_BLOCK_HEADER_CLASS,
+	CODE_BLOCK_ACTIONS_CLASS,
 	CODE_BLOCK_SCROLL_CONTAINER_CLASS,
-	CODE_ICON_SVG,
 	CODE_LANGUAGE_CLASS,
 	COPY_CODE_BTN_CLASS,
-	COPY_ICON_SVG,
-	DIAGRAM_SOURCE_CLASS,
 	PREVIEW_CODE_BTN_CLASS,
-	PREVIEW_ICON_SVG,
+	TOGGLE_SOURCE_BTN_CLASS,
+	DIAGRAM_SOURCE_CLASS,
 	RELATIVE_CLASS,
-	TOGGLE_SOURCE_BTN_CLASS
+	COPY_ICON_SVG,
+	PREVIEW_ICON_SVG,
+	CODE_ICON_SVG
 } from '$lib/constants';
-import type { Element, ElementContent } from 'hast';
 
 export interface BlockIdGenerator {
 	(id: number): string;
@@ -28,10 +28,10 @@ export interface BlockIdGenerator {
  */
 export function createIconElement(svg: string): Element {
 	return {
-		children: [{ type: 'raw', value: svg } as unknown as ElementContent],
-		properties: {},
+		type: 'element',
 		tagName: 'span',
-		type: 'element'
+		properties: {},
+		children: [{ type: 'raw', value: svg } as unknown as ElementContent]
 	};
 }
 
@@ -48,7 +48,8 @@ export function createButton(
 	extraProperties: Record<string, string> = {}
 ): Element {
 	return {
-		children: [createIconElement(iconSvg)],
+		type: 'element',
+		tagName: 'button',
 		properties: {
 			className: [className],
 			[idAttribute]: id,
@@ -56,8 +57,7 @@ export function createButton(
 			type: 'button',
 			...extraProperties
 		},
-		tagName: 'button',
-		type: 'element'
+		children: [createIconElement(iconSvg)]
 	};
 }
 
@@ -105,24 +105,23 @@ export function createSourceView(
 	language: string
 ): Element {
 	const code: Element = codeElement ?? {
-		children: [{ type: 'text', value: source }],
-		properties: { className: ['hljs', `language-${language}`] },
+		type: 'element',
 		tagName: 'code',
-		type: 'element'
+		properties: { className: ['hljs', `language-${language}`] },
+		children: [{ type: 'text', value: source }]
 	};
-
 	return {
+		type: 'element',
+		tagName: 'div',
+		properties: { className: [DIAGRAM_SOURCE_CLASS, CODE_BLOCK_SCROLL_CONTAINER_CLASS] },
 		children: [
 			{
-				children: [code],
-				properties: {},
+				type: 'element',
 				tagName: 'pre',
-				type: 'element'
+				properties: {},
+				children: [code]
 			}
-		],
-		properties: { className: [DIAGRAM_SOURCE_CLASS, CODE_BLOCK_SCROLL_CONTAINER_CLASS] },
-		tagName: 'div',
-		type: 'element'
+		]
 	};
 }
 
@@ -137,23 +136,23 @@ export function createBlockHeader(
 	languageClassName: string = CODE_LANGUAGE_CLASS
 ): Element {
 	return {
+		type: 'element',
+		tagName: 'div',
+		properties: { className: [CODE_BLOCK_HEADER_CLASS] },
 		children: [
 			{
-				children: [{ type: 'text', value: language }],
-				properties: { className: [languageClassName] },
+				type: 'element',
 				tagName: 'span',
-				type: 'element'
+				properties: { className: [languageClassName] },
+				children: [{ type: 'text', value: language }]
 			},
 			{
-				children: actions,
-				properties: { className: [CODE_BLOCK_ACTIONS_CLASS] },
+				type: 'element',
 				tagName: 'div',
-				type: 'element'
+				properties: { className: [CODE_BLOCK_ACTIONS_CLASS] },
+				children: actions
 			}
-		],
-		properties: { className: [CODE_BLOCK_HEADER_CLASS] },
-		tagName: 'div',
-		type: 'element'
+		]
 	};
 }
 
@@ -162,10 +161,10 @@ export function createBlockHeader(
  */
 export function createScrollContainer(preElement: Element, scrollContainerClass: string): Element {
 	return {
-		children: [preElement],
-		properties: { className: [scrollContainerClass] },
+		type: 'element',
 		tagName: 'div',
-		type: 'element'
+		properties: { className: [scrollContainerClass] },
+		children: [preElement]
 	};
 }
 
@@ -183,13 +182,13 @@ export function createWrapper(
 	extraChildren: Element[] = []
 ): Element {
 	return {
-		children: [header, createScrollContainer(preElement, scrollContainerClass), ...extraChildren],
+		type: 'element',
+		tagName: 'div',
 		properties: {
 			className: [wrapperClass, RELATIVE_CLASS],
 			...additionalAttributes
 		} as Element['properties'],
-		tagName: 'div',
-		type: 'element'
+		children: [header, createScrollContainer(preElement, scrollContainerClass), ...extraChildren]
 	};
 }
 
@@ -200,12 +199,9 @@ export function generateBlockId(prefix: string, windowKey: keyof Window): string
 	if (typeof window !== 'undefined') {
 		const idx = window[windowKey] as number | undefined;
 		const next = (idx ?? 0) + 1;
-
 		(window as unknown as Record<string, number>)[windowKey] = next;
-
 		return `${prefix}-${next}`;
 	}
-
 	// Fallback for SSR - use timestamp + random
 	return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }

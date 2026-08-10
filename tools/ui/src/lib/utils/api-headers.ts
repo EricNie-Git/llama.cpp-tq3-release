@@ -1,4 +1,4 @@
-import { redactValue } from './redact';
+import { config } from '$lib/stores/settings.svelte';
 import {
 	AUTHORIZATION_HEADER,
 	BEARER_PREFIX,
@@ -7,7 +7,7 @@ import {
 	REDACTED_HEADERS
 } from '$lib/constants';
 import { MimeTypeApplication } from '$lib/enums';
-import { config } from '$lib/stores/settings.svelte';
+import { redactValue } from './redact';
 
 /**
  * Get authorization headers for API requests
