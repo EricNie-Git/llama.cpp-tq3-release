@@ -476,6 +476,10 @@ static constexpr __host__ __device__ int calc_rows_per_block(int ncols_dst, int 
                 return small_k ? nwarps : 1;
             case 2:
             case 3:
+                // TQ3_4S large-K (MTP verify batches): extend the batch-1 small_k
+                // win (rows_per_block = nwarps) to the 2-3 wide verify path instead
+                // of leaving it hardcoded at 2.
+                return small_k ? nwarps : 2;
             case 4:
             case 5:
             case 6:
@@ -992,8 +996,11 @@ static void mul_mat_vec_q_switch_ncols_dst(
             use = false;
         }
 
-        if (GGML_CUDA_CC_IS_NVIDIA(cc) && type == GGML_TYPE_TQ3_4S && c_ncols_dst == 1) {
-            // 27B-class widths benefit from 2 rows/block; smaller models do not.
+        if (GGML_CUDA_CC_IS_NVIDIA(cc) && type == GGML_TYPE_TQ3_4S && c_ncols_dst >= 1 && c_ncols_dst <= 3) {
+            // 27B-class widths benefit from nwarps rows/block; smaller models do not.
+            // Extended from ncols_dst==1 to 2-3 to also cover MTP verify batches
+            // (n_max=2 -> ncols_dst up to 3), which previously fell back to the
+            // hardcoded rows_per_block=2 path and never got this win.
             constexpr int large_k_threshold_blocks = 144;
             if (blocks_per_row_x >= large_k_threshold_blocks) {
                 use = true;
@@ -1039,19 +1046,35 @@ static void mul_mat_vec_q_switch_ncols_dst(
         } break;
         case 2: {
             constexpr int c_ncols_dst = 2;
-            std::pair<dim3, dim3> dims = calc_launch_params<type>(c_ncols_dst, nrows_x, nchannels_dst, nsamples_dst, warp_size, table_id);
-            mul_mat_vec_q_switch_fusion<type, c_ncols_dst>(vx, vy, ids, fusion, dst, ncols_x, nchannels_y_fd, stride_row_x, stride_col_y, stride_col_dst,
-                 channel_ratio_fd, stride_channel_x, stride_channel_y, stride_channel_dst,
-                 sample_ratio_fd, stride_sample_x, stride_sample_y, stride_sample_dst,
-                 dims.first, dims.second, 0, ids_stride, stream);
+            bool use_small_k = should_use_small_k(c_ncols_dst);
+            std::pair<dim3, dim3> dims = calc_launch_params<type>(c_ncols_dst, nrows_x, nchannels_dst, nsamples_dst, warp_size, table_id, use_small_k);
+            if (use_small_k) {
+                mul_mat_vec_q_switch_fusion<type, c_ncols_dst, true>(vx, vy, ids, fusion, dst, ncols_x, nchannels_y_fd, stride_row_x, stride_col_y, stride_col_dst,
+                     channel_ratio_fd, stride_channel_x, stride_channel_y, stride_channel_dst,
+                     sample_ratio_fd, stride_sample_x, stride_sample_y, stride_sample_dst,
+                     dims.first, dims.second, 0, ids_stride, stream);
+            } else {
+                mul_mat_vec_q_switch_fusion<type, c_ncols_dst>(vx, vy, ids, fusion, dst, ncols_x, nchannels_y_fd, stride_row_x, stride_col_y, stride_col_dst,
+                     channel_ratio_fd, stride_channel_x, stride_channel_y, stride_channel_dst,
+                     sample_ratio_fd, stride_sample_x, stride_sample_y, stride_sample_dst,
+                     dims.first, dims.second, 0, ids_stride, stream);
+            }
         } break;
         case 3: {
             constexpr int c_ncols_dst = 3;
-            std::pair<dim3, dim3> dims = calc_launch_params<type>(c_ncols_dst, nrows_x, nchannels_dst, nsamples_dst, warp_size, table_id);
-            mul_mat_vec_q_switch_fusion<type, c_ncols_dst>(vx, vy, ids, fusion, dst, ncols_x, nchannels_y_fd, stride_row_x, stride_col_y, stride_col_dst,
-                 channel_ratio_fd, stride_channel_x, stride_channel_y, stride_channel_dst,
-                 sample_ratio_fd, stride_sample_x, stride_sample_y, stride_sample_dst,
-                 dims.first, dims.second, 0, ids_stride, stream);
+            bool use_small_k = should_use_small_k(c_ncols_dst);
+            std::pair<dim3, dim3> dims = calc_launch_params<type>(c_ncols_dst, nrows_x, nchannels_dst, nsamples_dst, warp_size, table_id, use_small_k);
+            if (use_small_k) {
+                mul_mat_vec_q_switch_fusion<type, c_ncols_dst, true>(vx, vy, ids, fusion, dst, ncols_x, nchannels_y_fd, stride_row_x, stride_col_y, stride_col_dst,
+                     channel_ratio_fd, stride_channel_x, stride_channel_y, stride_channel_dst,
+                     sample_ratio_fd, stride_sample_x, stride_sample_y, stride_sample_dst,
+                     dims.first, dims.second, 0, ids_stride, stream);
+            } else {
+                mul_mat_vec_q_switch_fusion<type, c_ncols_dst>(vx, vy, ids, fusion, dst, ncols_x, nchannels_y_fd, stride_row_x, stride_col_y, stride_col_dst,
+                     channel_ratio_fd, stride_channel_x, stride_channel_y, stride_channel_dst,
+                     sample_ratio_fd, stride_sample_x, stride_sample_y, stride_sample_dst,
+                     dims.first, dims.second, 0, ids_stride, stream);
+            }
         } break;
         case 4: {
             constexpr int c_ncols_dst = 4;
