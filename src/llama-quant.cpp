@@ -448,6 +448,21 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type 
         return std::make_pair(i_layer, n_layer);
     };
 
+    // Hybrid SSM (e.g. DeltaNet / qwen3next): keep the recurrent state-update gates in f32 by default.
+    // These tensors participate multiplicatively in the carried recurrent state, so quantization error
+    // compounds along the sequence instead of staying local to one matmul. Measured on Qwen3.8-27B
+    // (48 DeltaNet + 17 attention layers): quantizing ssm_alpha/ssm_beta to tq3_4s collapses long
+    // reasoning (17k-64k reasoning chars, structural codegen bugs); forcing f32 restores full depth
+    // (33k-120k) and eliminates the structural failure mode. Cost is small: ~12 MiB per family on the
+    // 27B model. Rule: tensors that participate multiplicatively in recurrent state updates stay f32;
+    // readouts and projections may be quantized. Override with --tensor-type or --pure.
+    // NOTE: can't use LLM_TN here because the layer number is not known
+    if (name.find("ssm_alpha") != std::string::npos ||
+        name.find("ssm_beta")  != std::string::npos ||
+        name.find("ssm_ba")    != std::string::npos) {
+        return GGML_TYPE_F32;
+    }
+
     // for arches that share the same tensor between the token embeddings and the output, we quantize the token embeddings
     // with the quantization of the output tensor
     if (category == tensor_category::OUTPUT || (qs.has_tied_embeddings && category == tensor_category::TOKEN_EMBD)) {
