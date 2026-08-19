@@ -506,9 +506,12 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     }
 
     // Asymmetric tq3_0 V (K=q8_0/q4_0, V=tq3_0): native vector path for decode.
+    // tq3_0 V has no GPU to_fp16 conversion, so the MMA_F16/TILE paths dereference
+    // a null function pointer for ANY batch size. Force the VEC kernel unconditionally
+    // (FAULT-008: segfault on multi-slot decode when Q->ne[1] > 4).
     const bool asymm_tq3_v = (K->type == GGML_TYPE_Q8_0 || K->type == GGML_TYPE_Q4_0) &&
                               V->type == GGML_TYPE_TQ3_0;
-    if (asymm_tq3_v && Q->ne[1] <= 4) {
+    if (asymm_tq3_v) {
         return can_use_vector_kernel ? BEST_FATTN_KERNEL_VEC : BEST_FATTN_KERNEL_NONE;
     }
 
@@ -517,6 +520,12 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     const bool asymm_turbo_v = (V->type == GGML_TYPE_TURBO3_0 || V->type == GGML_TYPE_TURBO4_0) &&
                                K->type != V->type;
     if (asymm_turbo_v) {
+        return can_use_vector_kernel ? BEST_FATTN_KERNEL_VEC : BEST_FATTN_KERNEL_NONE;
+    }
+
+    // tq3_0 K or V of any combination (same-type tq3_0/tq3_0, TURBO4_0 K, or tq3_0 K):
+    // same null to_fp16 hazard on MMA_F16/TILE. Force VEC (FAULT-008).
+    if (K->type == GGML_TYPE_TQ3_0 || V->type == GGML_TYPE_TQ3_0) {
         return can_use_vector_kernel ? BEST_FATTN_KERNEL_VEC : BEST_FATTN_KERNEL_NONE;
     }
 
