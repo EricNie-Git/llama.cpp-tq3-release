@@ -645,6 +645,67 @@ static void dequantize_row_tq3_0_cuda(const void * vx, dst_t * y, const int64_t 
     dequantize_block_tq3_0<<<nb, 32, 0, stream>>>(vx, y, nb);
 }
 
+// Strided (non-contiguous) tq3_0 -> fp16 converter for the FA MMA/TILE path.
+// s01/s02/s03 are in units of tq3_0 blocks (matching the generic nc convention).
+template<typename dst_t>
+static __global__ void dequantize_block_tq3_0_nc(const void * __restrict__ vx, dst_t * __restrict__ y,
+        const int64_t ne00, const int64_t ne01,
+        const int64_t ne0203, const uint3 ne02_fdv,
+        const int64_t s01, const int64_t s02, const int64_t s03) {
+    const int64_t i00 = (int64_t)blockDim.x*blockIdx.x + threadIdx.x;
+    if (i00 >= ne00) {
+        return;
+    }
+
+    for (int64_t i01 = blockIdx.y; i01 < ne01; i01 += gridDim.y) {
+        for (int64_t i0203 = blockIdx.z; i0203 < ne0203; i0203 += gridDim.z) {
+            const uint2 dm = fast_div_modulo((uint32_t)i0203, ne02_fdv);
+            const int64_t i02 = dm.y;
+            const int64_t i03 = dm.x;
+
+            const int64_t ibx0 = i03*s03 + i02*s02 + i01*s01;
+            const int64_t ib   = ibx0 + i00/QK_TQ3_0;
+            const int     j    = i00 % QK_TQ3_0;
+
+            const block_tq3_0 * xb = (const block_tq3_0 *) vx + ib;
+            const float d = __half2float(xb->d);
+
+            // No-WHT: direct centroid * d (V-only KV cache, stored without rotation)
+            const int g = j / 8;
+            const int r = j % 8;
+            const uint8_t * qp = xb->qs + g*3;
+            uint8_t idx;
+            switch (r) {
+                case 0: idx =  qp[0]       & 7; break;
+                case 1: idx = (qp[0] >> 3) & 7; break;
+                case 2: idx = ((qp[0] >> 6) | (qp[1] << 2)) & 7; break;
+                case 3: idx = (qp[1] >> 1) & 7; break;
+                case 4: idx = (qp[1] >> 4) & 7; break;
+                case 5: idx = ((qp[1] >> 7) | (qp[2] << 1)) & 7; break;
+                case 6: idx = (qp[2] >> 2) & 7; break;
+                default: idx = (qp[2] >> 5) & 7; break;
+            }
+
+            const int64_t iy = (i0203*ne01 + i01)*ne00 + i00;
+            y[iy] = ggml_cuda_cast<dst_t>(tq3_0_centroids_cuda[idx] * d);
+        }
+    }
+}
+
+template<typename dst_t>
+static void dequantize_row_tq3_0_nc_cuda(const void * vx, dst_t * y,
+        const int64_t ne00, const int64_t ne01, const int64_t ne02, const int64_t ne03,
+        const int64_t s01, const int64_t s02, const int64_t s03, cudaStream_t stream) {
+    const int64_t ne0203 = ne02*ne03;
+    const uint3 ne02_fdv = init_fastdiv_values(ne02);
+    const dim3 num_blocks(
+        (ne00 + CUDA_DEQUANTIZE_BLOCK_SIZE - 1) / CUDA_DEQUANTIZE_BLOCK_SIZE,
+        (int)std::min(ne01,    (int64_t)65535),
+        (int)std::min(ne0203,  (int64_t)65535));
+    dequantize_block_tq3_0_nc<<<num_blocks, CUDA_DEQUANTIZE_BLOCK_SIZE, 0, stream>>>
+        (vx, y, ne00, ne01, ne0203, ne02_fdv, s01, s02, s03);
+}
+
 template<typename dst_t>
 static __global__ void dequantize_block_tq3_1s(const void * __restrict__ vx, dst_t * __restrict__ yy, int nb) {
     const int i = blockIdx.x;
@@ -1129,6 +1190,8 @@ to_fp16_nc_cuda_t ggml_get_to_fp16_nc_cuda(ggml_type type) {
             return dequantize_block_cuda<QK5_1, QR5_1, dequantize_q5_1>;
         case GGML_TYPE_Q8_0:
             return dequantize_block_cuda<QK8_0, QR8_0, dequantize_q8_0>;
+        case GGML_TYPE_TQ3_0:
+            return dequantize_row_tq3_0_nc_cuda;
         case GGML_TYPE_BF16:
             return convert_unary_cuda<nv_bfloat16>;
         default:
