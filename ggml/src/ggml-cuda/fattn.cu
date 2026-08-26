@@ -477,7 +477,6 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         if (!asymm_tq3_ok && !is_kv_compat(K->type) && !is_kv_compat(V->type)) {
             return BEST_FATTN_KERNEL_NONE;
         }
-        // tq3_0-V asymmetric path must stay on VEC (not MMA) — handled below
     }
 #endif // GGML_CUDA_FA_ALL_QUANTS
 
@@ -505,18 +504,26 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
             break;
     }
 
-    // Asymmetric tq3_0 V (K=q8_0/q4_0, V=tq3_0): native vector path for decode.
-    const bool asymm_tq3_v = (K->type == GGML_TYPE_Q8_0 || K->type == GGML_TYPE_Q4_0) &&
-                              V->type == GGML_TYPE_TQ3_0;
-    if (asymm_tq3_v && Q->ne[1] <= 4) {
-        return can_use_vector_kernel ? BEST_FATTN_KERNEL_VEC : BEST_FATTN_KERNEL_NONE;
-    }
+    // tq3_0 KV (all combos incl. q8_0/q4_0 K + tq3_0 V): to_fp16_nc now has a real
+    // tq3_0 converter, so normal selection applies — VEC for small-batch decode
+    // (native dequant, no pre-conversion), MMA_F16 for larger batches.
+    // (supersedes the FAULT-008 forced-VEC workaround)
 
     // Asymmetric turbo V (K != V type): turbo types have no GPU to_fp16 conversion,
     // so the MMA_F16 tile path would dereference a null function pointer. Force VEC.
     const bool asymm_turbo_v = (V->type == GGML_TYPE_TURBO3_0 || V->type == GGML_TYPE_TURBO4_0) &&
                                K->type != V->type;
     if (asymm_turbo_v) {
+        return can_use_vector_kernel ? BEST_FATTN_KERNEL_VEC : BEST_FATTN_KERNEL_NONE;
+    }
+
+    // tq3_0 K or V of any combination now has a real to_fp16_nc converter, so normal
+    // selection applies (VEC for small-batch decode, MMA_F16 for larger batches).
+    // EXCEPTION: turbo-K + tq3_0-V — turbo K types have no to_fp16_nc converter, so
+    // MMA_F16/TILE pre-conversion would still dereference nullptr. Keep those on VEC.
+    const bool turbo_k_tq3_v = (K->type == GGML_TYPE_TURBO4_0 || K->type == GGML_TYPE_TURBO3_0 ||
+                                K->type == GGML_TYPE_TURBO2_0) && V->type == GGML_TYPE_TQ3_0;
+    if (turbo_k_tq3_v) {
         return can_use_vector_kernel ? BEST_FATTN_KERNEL_VEC : BEST_FATTN_KERNEL_NONE;
     }
 
